@@ -1,7 +1,8 @@
-// GET /api/sensors — manifest of every sensor type with its defaults.
+// GET /api/sensors — manifest of every sensor type with its defaults and
+// OGC SensorThings metadata.
 
 import { NextResponse } from "next/server";
-import { SENSORS, SENSOR_TYPES } from "@/lib/config";
+import { SENSORS, SENSOR_TYPES, observationTypeFor } from "@/lib/config";
 import type { SensorConfig } from "@/lib/types";
 
 export const dynamic = "force-static";
@@ -15,8 +16,14 @@ export async function GET() {
       kind: cfg.kind,
       min: cfg.min,
       max: cfg.max,
+      frequency: cfg.frequency,
+      unitOfMeasurement: cfg.unitOfMeasurement,
+      observationType: observationTypeFor(cfg.kind),
+      observedProperty: cfg.observedProperty,
       // Discrete sensors ignore min/max; surface their labels instead.
       ...(cfg.values ? { values: cfg.values } : {}),
+      // Ready-to-paste example (relative; prefix with your deployment origin).
+      csvUrl: `/api/sensor/${type}`,
     };
   });
 

@@ -1,16 +1,38 @@
 // Parse and validate query-string parameters into a SensorParams value.
 // Returns a discriminated union so callers can map failures to HTTP 400.
 
-import type { ParseResult } from "@/lib/types";
+import type { OutputFormat, ParseResult } from "@/lib/types";
+import { MAX_POINTS } from "@/lib/generator";
 
-/** Values that turn a `series` flag off; anything else present means on. */
-const FALSY = new Set(["0", "false", "no", "off"]);
+const FORMATS: Record<string, OutputFormat> = {
+  csv: "csv",
+  sta: "sta",
+  dataarray: "dataArray",
+  reading: "reading",
+};
+
+const DURATION_UNITS: Record<string, number> = {
+  ms: 1,
+  s: 1000,
+  m: 60 * 1000,
+  h: 3600 * 1000,
+};
 
 function parseNumber(raw: string): number | null {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
   const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Parse a duration like "24h", "90m", "30s", "1500ms", or bare seconds. */
+function parseDuration(raw: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(raw.trim().toLowerCase());
+  if (!m) return null;
+  const value = Number(m[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = m[2] ? DURATION_UNITS[m[2]] : DURATION_UNITS.s; // bare => seconds
+  return value * unit;
 }
 
 /**
@@ -72,12 +94,47 @@ export function parseParams(
     at = parsed;
   }
 
-  // series (presence flag; series=0/false/no/off disable it)
-  let series = false;
-  if (searchParams.has("series")) {
-    const raw = (searchParams.get("series") ?? "").trim().toLowerCase();
-    series = !FALSY.has(raw);
+  // format (csv default)
+  let format: OutputFormat = "csv";
+  if (searchParams.has("format")) {
+    const raw = (searchParams.get("format") ?? "").trim().toLowerCase();
+    const resolved = FORMATS[raw];
+    if (!resolved) {
+      return {
+        ok: false,
+        error: `Invalid format "${searchParams.get("format")}": must be one of csv, sta, dataArray, reading.`,
+      };
+    }
+    format = resolved;
   }
 
-  return { ok: true, value: { seed, min, max, at, series } };
+  // points (integer >= 1, capped at MAX_POINTS)
+  let points: number | undefined;
+  if (searchParams.has("points")) {
+    const raw = searchParams.get("points") ?? "";
+    const n = parseNumber(raw);
+    if (n === null || !Number.isInteger(n) || n < 1) {
+      return {
+        ok: false,
+        error: `Invalid points "${raw}": must be an integer >= 1.`,
+      };
+    }
+    points = Math.min(n, MAX_POINTS);
+  }
+
+  // window (duration string; overrides points)
+  let windowMs: number | undefined;
+  if (searchParams.has("window")) {
+    const raw = searchParams.get("window") ?? "";
+    const ms = parseDuration(raw);
+    if (ms === null) {
+      return {
+        ok: false,
+        error: `Invalid window "${raw}": use a duration like 24h, 90m, 30s, 1500ms, or bare seconds.`,
+      };
+    }
+    windowMs = ms;
+  }
+
+  return { ok: true, value: { seed, min, max, at, format, points, windowMs } };
 }

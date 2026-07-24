@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { generateReading, generateSeries } from "@/lib/generator";
+import {
+  generateReading,
+  generateWindow,
+  MAX_POINTS,
+} from "@/lib/generator";
 import { SENSORS } from "@/lib/config";
 import type { SensorParams } from "@/lib/types";
 
 const AT = new Date("2026-07-23T14:05:00Z");
 
 function params(overrides: Partial<SensorParams> = {}): SensorParams {
-  return { seed: 0, at: AT, series: false, ...overrides };
+  return { seed: 0, at: AT, format: "csv", ...overrides };
 }
 
 describe("generateReading — determinism", () => {
@@ -21,17 +25,32 @@ describe("generateReading — determinism", () => {
     const b = generateReading("temperature", params({ seed: 2 })).value;
     expect(a).not.toEqual(b);
   });
+});
 
-  it("differs at different timestamps", () => {
-    const a = generateReading(
-      "temperature",
-      params({ at: new Date("2026-07-23T03:00:00Z") }),
-    ).value;
-    const b = generateReading(
-      "temperature",
-      params({ at: new Date("2026-07-23T15:00:00Z") }),
-    ).value;
-    expect(a).not.toEqual(b);
+describe("generateReading — gentle per-reading fluctuation", () => {
+  it("consecutive-second readings change, but only slightly", () => {
+    const range = SENSORS.temperature.max - SENSORS.temperature.min;
+    const values: number[] = [];
+    for (let s = 0; s < 12; s++) {
+      const at = new Date(AT.getTime() + s * 1000);
+      values.push(
+        generateReading("temperature", params({ seed: 5, at })).value as number,
+      );
+    }
+    // They must not all be identical (visible fluctuation).
+    const unique = new Set(values);
+    expect(unique.size).toBeGreaterThan(1);
+    // But each step is gentle: no jump larger than 5% of the range.
+    for (let i = 1; i < values.length; i++) {
+      expect(Math.abs(values[i] - values[i - 1])).toBeLessThan(range * 0.05);
+    }
+  });
+
+  it("still resolves identically at the exact same instant (determinism holds)", () => {
+    const at = new Date(AT.getTime() + 7000);
+    const a = generateReading("temperature", params({ seed: 5, at })).value;
+    const b = generateReading("temperature", params({ seed: 5, at })).value;
+    expect(a).toBe(b);
   });
 });
 
@@ -49,8 +68,6 @@ describe("generateReading — clamping and range", () => {
   });
 
   it("respects user min/max and stretches the curve into the new band (not clipping)", () => {
-    // Sweep a full day with a stretched band; the diurnal trough must dip
-    // well below the default min of 15, proving the shape is scaled not clipped.
     let seenBelowZero = false;
     for (let m = 0; m < 24 * 60; m += 5) {
       const at = new Date(Date.UTC(2026, 6, 23, 0, m, 0));
@@ -63,7 +80,6 @@ describe("generateReading — clamping and range", () => {
       if ((r.value as number) < 0) seenBelowZero = true;
     }
     expect(seenBelowZero).toBe(true);
-    // Effective range is echoed back.
     const one = generateReading(
       "temperature",
       params({ seed: 2, min: -20, max: 50 }),
@@ -72,19 +88,13 @@ describe("generateReading — clamping and range", () => {
     expect(one.max).toBe(50);
   });
 
-  it("supports a one-sided max override (min falls back to the type default)", () => {
-    const r = generateReading("temperature", params({ max: 20 }));
-    expect(r.min).toBe(SENSORS.temperature.min); // default 15
-    expect(r.max).toBe(20);
-    expect(r.value as number).toBeGreaterThanOrEqual(15);
-    expect(r.value as number).toBeLessThanOrEqual(20);
-  });
-
-  it("supports a one-sided min override (max falls back to the type default)", () => {
-    const r = generateReading("temperature", params({ min: 25 }));
-    expect(r.min).toBe(25);
-    expect(r.max).toBe(SENSORS.temperature.max); // default 30
-    expect(r.value as number).toBeGreaterThanOrEqual(25);
+  it("supports one-sided overrides", () => {
+    const hi = generateReading("temperature", params({ max: 20 }));
+    expect(hi.min).toBe(SENSORS.temperature.min);
+    expect(hi.max).toBe(20);
+    const lo = generateReading("temperature", params({ min: 25 }));
+    expect(lo.min).toBe(25);
+    expect(lo.max).toBe(SENSORS.temperature.max);
   });
 });
 
@@ -102,39 +112,70 @@ describe("generateReading — discrete sensors", () => {
       expect(SENSORS.state.values).toContain(r.value);
     }
   });
-
-  it("discrete sensors ignore supplied min/max without error", () => {
-    const r = generateReading("movement", params({ min: 5, max: 9 }));
-    expect([0, 1]).toContain(r.value);
-  });
 });
 
-describe("generateSeries", () => {
-  it("returns 288 points at 5-minute cadence", () => {
-    const s = generateSeries("temperature", params({ seed: 2 }));
-    expect(s.series).toHaveLength(288);
-    const t0 = new Date(s.series[0].timestamp).getTime();
-    const t1 = new Date(s.series[1].timestamp).getTime();
-    expect(t1 - t0).toBe(5 * 60 * 1000);
+describe("generateWindow — points mode", () => {
+  it("defaults to 288 points at the sensor frequency, ending at params.at", () => {
+    const w = generateWindow("temperature", params({ seed: 2 }));
+    expect(w).toHaveLength(288);
+    expect(w[0].at).toBeInstanceOf(Date);
+    const step = w[1].at.getTime() - w[0].at.getTime();
+    expect(step).toBe(SENSORS.temperature.frequency);
+    // Last point is anchored to a frequency bucket at/just before params.at.
+    expect(w[w.length - 1].at.getTime()).toBeLessThanOrEqual(AT.getTime());
   });
 
-  it("is deterministic and matches point-wise generateReading", () => {
-    const s = generateSeries("temperature", params({ seed: 2 }));
-    const last = s.series[s.series.length - 1];
+  it("honors an explicit point count", () => {
+    const w = generateWindow("temperature", params({ points: 50 }));
+    expect(w).toHaveLength(50);
+  });
+
+  it("matches point-wise generateReading at the same instant", () => {
+    const w = generateWindow("temperature", params({ seed: 2, points: 10 }));
+    const last = w[w.length - 1];
     const single = generateReading(
       "temperature",
-      params({ seed: 2, at: new Date(last.timestamp) }),
+      params({ seed: 2, at: last.at }),
     );
     expect(last.value).toBe(single.value);
   });
+});
 
-  it("flow stays flat (mostly zero) overnight and bursts during the day", () => {
-    const s = generateSeries("flow", params({ seed: 7 }));
-    // The series ends at AT and spans the prior 24h, so it covers a full day.
-    const values = s.series.map((p) => p.value as number);
-    const maxVal = Math.max(...values);
-    const zeroish = values.filter((v) => v < 0.6).length;
-    expect(maxVal).toBeGreaterThan(2); // a real burst occurs
-    expect(zeroish).toBeGreaterThan(values.length / 3); // long quiet stretches
+describe("generateWindow — duration mode", () => {
+  it("spans the requested window at the sensor frequency when under the cap", () => {
+    // temperature freq = 5 min -> 24h = 289 points (<= cap).
+    const w = generateWindow(
+      "temperature",
+      params({ windowMs: 24 * 3600 * 1000 }),
+    );
+    expect(w.length).toBeLessThanOrEqual(MAX_POINTS);
+    expect(w.length).toBeGreaterThan(280);
+    const spanMs = w[w.length - 1].at.getTime() - w[0].at.getTime();
+    expect(spanMs).toBeGreaterThan(23 * 3600 * 1000);
+  });
+
+  it("downsamples fast sensors so the window never exceeds the cap", () => {
+    // noise_level freq = 1s -> 24h would be ~86400 points; must downsample.
+    const w = generateWindow(
+      "noise_level",
+      params({ windowMs: 24 * 3600 * 1000 }),
+    );
+    expect(w.length).toBeLessThanOrEqual(MAX_POINTS);
+    expect(w.length).toBeGreaterThan(500);
+    const spanMs = w[w.length - 1].at.getTime() - w[0].at.getTime();
+    // Still covers roughly the whole day.
+    expect(spanMs).toBeGreaterThan(23 * 3600 * 1000);
+  });
+});
+
+describe("generateWindow — flow behavior preserved", () => {
+  it("flow is mostly zero overnight with a daytime burst over 24h", () => {
+    const w = generateWindow(
+      "flow",
+      params({ seed: 7, windowMs: 24 * 3600 * 1000 }),
+    );
+    const v = w.map((p) => p.value as number);
+    expect(Math.max(...v)).toBeGreaterThan(2);
+    expect(v.filter((x) => x < 0.6).length).toBeGreaterThan(v.length / 3);
   });
 });

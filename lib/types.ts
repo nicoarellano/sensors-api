@@ -5,17 +5,45 @@
  * - `continuous`: a smooth diurnal curve scaled into the effective [min, max] range.
  * - `binary`: a 0/1 occupancy-style event (min/max are ignored).
  * - `enum`: a discrete label drawn from `values` (min/max are ignored).
+ *
+ * These map to OGC SensorThings observation types (see `observationType` in
+ * `lib/config.ts`): continuous -> OM_Measurement, binary -> OM_TruthObservation,
+ * enum -> OM_CategoryObservation.
  */
 export type SensorKind = "continuous" | "binary" | "enum";
 
+/** OGC SensorThings Datastream.unitOfMeasurement (null trio for unitless sensors). */
+export interface UnitOfMeasurement {
+  name: string | null;
+  symbol: string | null;
+  /** IRI defining the unit (UCUM / QUDT). */
+  definition: string | null;
+}
+
+/** OGC SensorThings ObservedProperty (subset). */
+export interface ObservedProperty {
+  name: string;
+  /** IRI identifying the observed phenomenon. */
+  definition: string;
+}
+
 export interface SensorConfig {
-  /** Unit label, e.g. "°C", "lux", "ppm". */
+  /** Short unit label, e.g. "°C", "lux", "ppm". */
   unit: string;
   /** Default lower bound of the natural range. */
   min: number;
   /** Default upper bound of the natural range. */
   max: number;
   kind: SensorKind;
+  /**
+   * Default sampling interval in milliseconds. Metadata that maps to a CollabDT
+   * sensor's `updateFrequency`; also the default cadence of a generated window.
+   */
+  frequency: number;
+  /** OGC SensorThings unit descriptor for this sensor. */
+  unitOfMeasurement: UnitOfMeasurement;
+  /** OGC SensorThings observed property for this sensor. */
+  observedProperty: ObservedProperty;
   /**
    * Normalized noise amplitude in [0, 1] (fraction of the effective range).
    * 0 disables noise. Ignored for discrete kinds.
@@ -42,7 +70,7 @@ export interface SensorConfig {
   weights?: (hour: number) => number[];
 }
 
-/** A single sensor reading returned by the API. */
+/** A single sensor reading (used by `?format=reading`). */
 export interface Reading {
   type: string;
   unit: string;
@@ -55,21 +83,15 @@ export interface Reading {
   max?: number;
 }
 
-/** One point in a time series. */
-export interface SeriesPoint {
-  timestamp: string;
+/** One generated sample: an absolute instant plus its value. */
+export interface WindowPoint {
+  /** Absolute instant of the sample. */
+  at: Date;
   value: number | string;
 }
 
-/** A 24h series response. */
-export interface Series {
-  type: string;
-  unit: string;
-  seed: number;
-  min?: number;
-  max?: number;
-  series: SeriesPoint[];
-}
+/** Output representations of a generated window. */
+export type OutputFormat = "csv" | "sta" | "dataArray" | "reading";
 
 /** Validated query parameters shared by the generator functions. */
 export interface SensorParams {
@@ -78,10 +100,14 @@ export interface SensorParams {
   min?: number;
   /** User-supplied override, or undefined to use the type default. */
   max?: number;
-  /** The instant to evaluate at. */
+  /** The instant the window ends at (or the single reading is evaluated at). */
   at: Date;
-  /** Whether the caller requested a 24h series instead of a single reading. */
-  series: boolean;
+  /** Requested output representation. */
+  format: OutputFormat;
+  /** Number of points to return (points-based window). */
+  points?: number;
+  /** Total span in milliseconds (duration-based window); overrides `points`. */
+  windowMs?: number;
 }
 
 /** Discriminated result of parsing/validating query parameters. */

@@ -73,7 +73,7 @@ function LiveTile({ entry }: { entry: ManifestEntry }) {
     let active = true;
     const tick = async () => {
       try {
-        const res = await fetch(`/api/sensor/${entry.type}?seed=1&points=${TILE_POINTS}`, {
+        const res = await fetch(`/api/sensor/${entry.type}?seed=1&points=${TILE_POINTS}&format=csv`, {
           cache: "no-store",
         });
         const text = await res.text();
@@ -163,8 +163,9 @@ export default function Home() {
         <p className="text-foreground/60 max-w-2xl">
           Deterministic, OGC-SensorThings-shaped synthetic sensor data. Each reading follows a
           diurnal curve plus gentle seeded noise, so the same URL is reproducible while readings
-          still fluctuate. Serve it as CSV (drops straight into a CollabDT sensor Data URL) or as
-          OGC JSON.
+          still fluctuate. Returns an OGC SensorThings Datastream by default — paste the URL
+          straight into a CollabDT sensor (Data format = Json). CSV, dataArray, and reading
+          formats are available via <span className="font-mono">?format=</span>.
         </p>
       </header>
 
@@ -180,9 +181,9 @@ export default function Home() {
       <section className="flex flex-col gap-3">
         <h2 className="text-sm uppercase tracking-wide text-foreground/50">Use in CollabDT</h2>
         <p className="text-sm text-foreground/60 max-w-2xl">
-          In a sensor&apos;s form, set <span className="font-mono">Data format = Csv</span> and paste one of
-          these as the <span className="font-mono">Data URL</span>. Set the update frequency to the
-          sensor&apos;s default (shown in the table).
+          In a sensor&apos;s form, set <span className="font-mono">Data format = Json</span> and paste one of
+          these as the <span className="font-mono">Data URL</span>. The unit comes through from the STA
+          Datastream. Set the update frequency to the sensor&apos;s default (shown in the table).
         </p>
         <div className="flex flex-col gap-2 max-w-2xl">
           <CopyUrl path="/api/sensor/temperature" />
@@ -201,7 +202,7 @@ export default function Home() {
                 <th className="py-2 pr-4 font-medium">Kind</th>
                 <th className="py-2 pr-4 font-medium">Default range</th>
                 <th className="py-2 pr-4 font-medium">Frequency</th>
-                <th className="py-2 pr-4 font-medium">CSV</th>
+                <th className="py-2 pr-4 font-medium">Data URL</th>
               </tr>
             </thead>
             <tbody className="font-mono">
@@ -237,12 +238,13 @@ export default function Home() {
           {[
             "/api/sensors",
             "/api/sensor/temperature",
+            "/api/sensor/temperature?format=csv",
+            "/api/sensor/temperature?format=dataArray&points=50",
+            "/api/sensor/temperature?format=reading",
             "/api/sensor/temperature?seed=2&min=-20&max=50",
             "/api/sensor/temperature?window=24h",
-            "/api/sensor/temperature?points=50&format=dataArray",
-            "/api/sensor/temperature?format=sta",
-            "/api/sensor/flow?seed=7&window=24h",
-            "/api/sensor/state?format=sta",
+            "/api/sensor/flow?seed=7&window=24h&format=csv",
+            "/api/sensor/state?format=csv",
           ].map((href) => (
             <li key={href}>
               <a className="text-blue-600 dark:text-blue-400 hover:underline break-all" href={href} target="_blank" rel="noreferrer">

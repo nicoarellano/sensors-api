@@ -1,11 +1,12 @@
 # Synthetic Sensor API
 
 A Next.js (App Router, TypeScript) service that generates synthetic, sensor-like
-time series and serves them both as **plain CSV that drops straight into a
-CollabDT sensor's Data URL** and as **OGC SensorThings-shaped JSON** (Datastream +
-Observations). Each value is computed from a timestamp plus a seeded PRNG, so the
-same URL is always reproducible and different seeds simulate different physical
-sensors.
+time series. By default it serves **OGC SensorThings-shaped JSON** (Datastream +
+Observations) — the shape CollabDT's sensor consumer reads directly, with the
+unit included. A compact `dataArray`, a single `reading`, and plain `csv` are
+available via `?format=`. Each value is computed from a timestamp plus a seeded
+PRNG, so the same URL is always reproducible and different seeds simulate
+different physical sensors.
 
 Values follow a realistic diurnal profile (a function of time-of-day) plus two
 layers of bounded, smooth seeded noise, and are always clamped to the effective
@@ -32,15 +33,15 @@ Other scripts: `yarn build`, `yarn start`, `yarn lint`, `yarn test`.
 ### `GET /api/sensor/{type}`
 
 Returns a generated window of data. The response shape depends on `?format=`
-(default `csv`). By default it returns **288 points** sampled at the sensor's
+(default `sta`). By default it returns **288 points** sampled at the sensor's
 natural frequency, ending at "now".
 
 #### Formats
 
 | `format`    | Content-Type | Body |
 |-------------|--------------|------|
-| `csv` *(default)* | `text/csv; charset=utf-8` | Header-less `time,value` rows, one point per line. Clock-style UTC `H:MM:SS` time. This is what CollabDT's `SensorChart` fetches and parses. |
-| `sta`       | `application/json` | An OGC SensorThings **Datastream** object with `unitOfMeasurement`, `observationType`, `ObservedProperty`, a `phenomenonTime` interval, and embedded `Observations[]`. |
+| `sta` *(default)* | `application/json` | An OGC SensorThings **Datastream** object with `unitOfMeasurement`, `observationType`, `ObservedProperty`, a `phenomenonTime` interval, and embedded `Observations[]`. |
+| `csv`       | `text/csv; charset=utf-8` | Header-less `time,value` rows, one point per line. Clock-style UTC `H:MM:SS` time. This is what CollabDT's `SensorChart` fetches and parses. |
 | `dataArray` | `application/json` | The compact OGC `{ components, dataArray }` time-series form: rows of `[phenomenonTime, result]`. |
 | `reading`   | `application/json` | A single latest reading (the legacy single-value shape) evaluated at `at`. |
 
@@ -49,7 +50,7 @@ natural frequency, ending at "now".
 | Param    | Type            | Default | Notes |
 |----------|-----------------|---------|-------|
 | `{type}` | path segment    | —       | Required. One of the sensor types below. Case-insensitive. |
-| `format` | enum            | `csv`   | `csv` \| `sta` \| `dataArray` \| `reading`. Invalid → 400. |
+| `format` | enum            | `sta`   | `sta` \| `csv` \| `dataArray` \| `reading`. Invalid → 400. |
 | `points` | integer ≥ 1     | `288`   | Number of samples, spaced at the sensor's frequency. Capped at **1000**. Non-integer → 400. |
 | `window` | duration string | —       | Total span, e.g. `24h`, `90m`, `30s`, `1500ms`, or bare seconds. Samples at the sensor's frequency and **downsamples to ≤ 1000 points**. Overrides `points`. Invalid → 400. |
 | `seed`   | integer         | `0`     | Seeds a deterministic PRNG. Different seeds → different reproducible series. |
@@ -77,18 +78,7 @@ so `parseFloat` charts a step line; STA/dataArray keep the string label.
 - Malformed params (non-numeric `seed`/`min`/`max`, `min > max`, unparseable
   `at`, bad `format`/`points`/`window`) → **400** with `{ error }`.
 
-#### CSV response (default)
-
-```
-14:30:00,23.71
-14:35:00,23.68
-14:40:00,23.74
-```
-
-No header row. `time` is clock-style UTC `H:MM:SS`; `value` is `parseFloat`-able
-for every sensor kind.
-
-#### STA response (`?format=sta`)
+#### STA response (default)
 
 ```json
 {
@@ -133,11 +123,22 @@ boolean for `OM_TruthObservation` (`movement`), a string label for
 }
 ```
 
+#### CSV response (`?format=csv`)
+
+```
+14:30:00,23.71
+14:35:00,23.68
+14:40:00,23.74
+```
+
+No header row. `time` is clock-style UTC `H:MM:SS`; `value` is `parseFloat`-able
+for every sensor kind. This is the format CollabDT's `SensorChart` consumes.
+
 ### `GET /api/sensors`
 
 Manifest listing every sensor type with its default `unit`, `kind`, `min`,
 `max`, `frequency`, OGC `unitOfMeasurement`/`observationType`/`observedProperty`,
-`values` (enum sensors), and a ready-to-paste `csvUrl`.
+`values` (enum sensors), and ready-to-paste `staUrl` (default) + `csvUrl`.
 
 ## Sensor types
 
@@ -173,15 +174,19 @@ use a `null` `unitOfMeasurement` trio.
 
 ## Use in CollabDT
 
-The default CSV output is designed to be pasted straight into a CollabDT sensor:
+CollabDT's sensor consumer reads the default STA JSON directly — the unit comes
+through automatically from the Datastream's `unitOfMeasurement`, and the chart
+polls the URL and rolls the window forward:
 
-1. In `SensorInput`, create a sensor and set **dataFormat = Csv**.
+1. In `SensorInput`, create a sensor and set **dataFormat = Json**.
 2. Set the **Data URL** to `https://<your-deploy>/api/sensor/<type>` (optionally
-   with `?seed=`, `?points=`, or `?window=`).
+   add `?seed=`, `?points=`, or `?window=`).
 3. Set the sensor's **update frequency** to the type's default `frequency` above.
 
-`SensorChart` fetches that URL and parses the header-less `time,value` CSV
-directly. The `state` sensor charts as a step line via its ordinal encoding.
+The consumer auto-detects STA, `dataArray`, and single-`reading` JSON. CSV is
+still supported for other consumers: set **dataFormat = Csv** and append
+`?format=csv`. The `state` sensor charts as a step line (its STA category labels
+show in the tooltip; CSV encodes the ordinal index).
 
 ## How seeding works
 
@@ -205,16 +210,28 @@ evaluated in **UTC** so results are identical regardless of server timezone.
 ## Example URLs
 
 ```
+# Manifest
 /api/sensors
-/api/sensor/temperature                              # 288-point CSV window, now
+
+# Formats (default is sta)
+/api/sensor/temperature                              # STA Datastream + Observations (default)
+/api/sensor/temperature?format=csv                   # header-less time,value CSV (for CollabDT)
+/api/sensor/temperature?format=dataArray             # compact OGC {components, dataArray}
+/api/sensor/temperature?format=reading               # single latest reading
+
+# Windowing
+/api/sensor/temperature?points=50&format=dataArray   # 50-row dataArray
 /api/sensor/temperature?window=24h                   # last 24h, downsampled ≤1000
-/api/sensor/temperature?points=50&format=dataArray   # 50-row OGC dataArray
-/api/sensor/temperature?format=sta                   # OGC Datastream + Observations
+/api/sensor/flow?seed=7&window=24h&format=csv         # 24h CSV window
+
+# Seeding, range, fixed instant
 /api/sensor/temperature?seed=2&min=-20&max=50        # stretched across -20..50
 /api/sensor/temperature?at=2026-07-23T14:05:00Z      # window ending at a fixed instant
-/api/sensor/state?format=sta                         # result is a label
-/api/sensor/state                                    # CSV: ordinal index
-/api/sensor/movement?format=sta                      # result is a boolean
+
+# Discrete sensors
+/api/sensor/state                                    # STA: result is a string label
+/api/sensor/state?format=csv                         # CSV: result is the ordinal index
+/api/sensor/movement?format=sta                      # STA: result is a boolean
 ```
 
 ## Adding or modifying a sensor

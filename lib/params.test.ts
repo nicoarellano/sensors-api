@@ -8,13 +8,13 @@ function parse(qs: string) {
 }
 
 describe("parseParams — defaults", () => {
-  it("defaults to seed 0, now, csv format, no window overrides", () => {
+  it("defaults to seed 0, now, sta format, no window overrides", () => {
     const r = parse("");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.seed).toBe(0);
     expect(r.value.at.toISOString()).toBe(NOW.toISOString());
-    expect(r.value.format).toBe("csv");
+    expect(r.value.format).toBe("sta");
     expect(r.value.points).toBeUndefined();
     expect(r.value.windowMs).toBeUndefined();
     expect(r.value.min).toBeUndefined();

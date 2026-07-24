@@ -22,8 +22,10 @@ export async function GET() {
       observedProperty: cfg.observedProperty,
       // Discrete sensors ignore min/max; surface their labels instead.
       ...(cfg.values ? { values: cfg.values } : {}),
-      // Ready-to-paste example (relative; prefix with your deployment origin).
-      csvUrl: `/api/sensor/${type}`,
+      // Ready-to-paste examples (relative; prefix with your deployment origin).
+      // The bare URL returns STA (the default); CSV is what a CollabDT sensor consumes.
+      staUrl: `/api/sensor/${type}`,
+      csvUrl: `/api/sensor/${type}?format=csv`,
     };
   });
 

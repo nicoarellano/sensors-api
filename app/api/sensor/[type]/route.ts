@@ -1,8 +1,8 @@
 // GET /api/sensor/[type] — a generated window of sensor data in one of several
 // formats. In Next.js 16 the dynamic `params` is a Promise and must be awaited.
 //
-//   ?format=csv        (default) header-less `time,value` for CollabDT SensorChart
-//   ?format=sta        OGC SensorThings Datastream + Observations
+//   ?format=sta        (default) OGC SensorThings Datastream + Observations
+//   ?format=csv        header-less `time,value` for CollabDT SensorChart
 //   ?format=dataArray  compact OGC {components, dataArray}
 //   ?format=reading    a single latest reading
 //   ?points=N | ?window=24h   window sizing (see lib/params.ts)

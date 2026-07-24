@@ -94,8 +94,8 @@ export function parseParams(
     at = parsed;
   }
 
-  // format (csv default)
-  let format: OutputFormat = "csv";
+  // format (sta default — the OGC SensorThings shape)
+  let format: OutputFormat = "sta";
   if (searchParams.has("format")) {
     const raw = (searchParams.get("format") ?? "").trim().toLowerCase();
     const resolved = FORMATS[raw];

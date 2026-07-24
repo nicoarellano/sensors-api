@@ -146,6 +146,9 @@ function CopyUrl({ path }: { path: string }) {
 
 export default function Home() {
   const [manifest, setManifest] = useState<Manifest | null>(null);
+  // Client-only origin so the table shows full, copy-pasteable URLs (SSR renders the
+  // bare path; the anchor carries suppressHydrationWarning). Same pattern as CopyUrl.
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
 
   useEffect(() => {
     fetch("/api/sensors")
@@ -217,12 +220,13 @@ export default function Home() {
                   <td className="py-2 pr-4 text-foreground/50">{Math.round(s.frequency / 1000)}s</td>
                   <td className="py-2 pr-4">
                     <a
-                      className="text-blue-600 dark:text-blue-400 hover:underline"
+                      className="text-blue-600 dark:text-blue-400 hover:underline break-all"
                       href={`/api/sensor/${s.type}`}
                       target="_blank"
                       rel="noreferrer"
+                      suppressHydrationWarning
                     >
-                      /api/sensor/{s.type}
+                      {origin}/api/sensor/{s.type}
                     </a>
                   </td>
                 </tr>

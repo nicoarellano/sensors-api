@@ -51,7 +51,9 @@ export async function GET(
   }
 
   if (p.format === "sta") {
-    return NextResponse.json(formatSta(type, p, points), { headers: NO_STORE });
+    return NextResponse.json(formatSta(type, p, points, request.nextUrl.origin), {
+      headers: NO_STORE,
+    });
   }
 
   // dataArray

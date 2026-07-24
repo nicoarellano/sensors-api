@@ -80,24 +80,43 @@ so `parseFloat` charts a step line; STA/dataArray keep the string label.
 
 #### STA response (default)
 
+A standard SensorThings **Datastream** entity graph: it links an inline `Sensor`
+and `ObservedProperty`, embeds `Observations`, and carries `@iot.*` annotations.
+Full field reference in [`docs/ogc-sensorthings-integration.md`](docs/ogc-sensorthings-integration.md).
+
 ```json
 {
-  "name": "temperature (seed 0)",
+  "@iot.id": 1,
+  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta",
+  "name": "Air Temperature",
   "description": "Synthetic Air Temperature datastream for temperature.",
+  "observationType": "http://www.opengis.net/def/observationType/OGC-OM/2.0/OM_Measurement",
   "unitOfMeasurement": {
     "name": "degree Celsius",
     "symbol": "°C",
     "definition": "https://qudt.org/vocab/unit/DEG_C"
   },
-  "observationType": "http://www.opengis.net/def/observationType/OGC-OM/2.0/OM_Measurement",
-  "ObservedProperty": {
-    "name": "Air Temperature",
-    "definition": "https://dbpedia.org/page/Temperature"
-  },
   "phenomenonTime": "2026-07-22T14:30:00.000Z/2026-07-23T14:30:00.000Z",
+  "resultTime": "2026-07-22T14:30:00.000Z/2026-07-23T14:30:00.000Z",
+  "properties": { "seed": 0, "frequency": 300000, "generator": "sensors-api" },
+  "Sensor": {
+    "@iot.id": 1,
+    "name": "Synthetic temperature sensor",
+    "description": "Deterministic diurnal curve + seeded noise.",
+    "encodingType": "text/html",
+    "metadata": "https://github.com/nicoarellano/sensors-api"
+  },
+  "ObservedProperty": {
+    "@iot.id": 1,
+    "name": "Air Temperature",
+    "definition": "https://dbpedia.org/page/Temperature",
+    "description": "Air Temperature"
+  },
+  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray",
   "Observations@iot.count": 288,
   "Observations": [
     {
+      "@iot.id": 1,
       "phenomenonTime": "2026-07-22T14:30:00.000Z",
       "resultTime": "2026-07-22T14:30:00.000Z",
       "result": 23.71
@@ -108,7 +127,8 @@ so `parseFloat` charts a step line; STA/dataArray keep the string label.
 
 `result` is typed to match `observationType`: a number for `OM_Measurement`, a
 boolean for `OM_TruthObservation` (`movement`), a string label for
-`OM_CategoryObservation` (`state`).
+`OM_CategoryObservation` (`state`). `Thing`/`Location`/`FeatureOfInterest` are
+intentionally omitted — deployment geography is owned by the consuming app.
 
 #### dataArray response (`?format=dataArray`)
 

@@ -5,6 +5,7 @@ import { SENSORS, OBSERVATION_TYPE } from "@/lib/config";
 import type { SensorParams } from "@/lib/types";
 
 const AT = new Date("2026-07-23T14:05:00Z");
+const ORIGIN = "https://sensors.example";
 
 function params(overrides: Partial<SensorParams> = {}): SensorParams {
   return { seed: 2, at: AT, format: "csv", points: 20, ...overrides };
@@ -66,7 +67,7 @@ describe("formatCsv — matches the CDT SensorChart contract", () => {
 describe("formatSta — OGC SensorThings Datastream + Observations", () => {
   it("carries unitOfMeasurement, OM_Measurement type, and numeric ISO observations", () => {
     const points = generateWindow("temperature", params());
-    const ds = formatSta("temperature", params(), points);
+    const ds = formatSta("temperature", params(), points, ORIGIN);
     expect(ds.unitOfMeasurement).toEqual(SENSORS.temperature.unitOfMeasurement);
     expect(ds.observationType).toBe(OBSERVATION_TYPE.measurement);
     expect(ds.Observations).toHaveLength(points.length);
@@ -82,7 +83,7 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
 
   it("uses OM_TruthObservation with boolean result for binary sensors", () => {
     const points = generateWindow("movement", params());
-    const ds = formatSta("movement", params(), points);
+    const ds = formatSta("movement", params(), points, ORIGIN);
     expect(ds.observationType).toBe(OBSERVATION_TYPE.truth);
     expect(ds.unitOfMeasurement.name).toBeNull();
     for (const o of ds.Observations) {
@@ -92,11 +93,40 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
 
   it("uses OM_CategoryObservation with string label result for enum sensors", () => {
     const points = generateWindow("state", params());
-    const ds = formatSta("state", params(), points);
+    const ds = formatSta("state", params(), points, ORIGIN);
     expect(ds.observationType).toBe(OBSERVATION_TYPE.category);
     for (const o of ds.Observations) {
       expect(SENSORS.state.values).toContain(o.result as string);
     }
+  });
+
+  it("builds a standard entity graph: @iot ids, self/nav links, Sensor + ObservedProperty", () => {
+    const points = generateWindow("temperature", params());
+    const ds = formatSta("temperature", params(), points, ORIGIN);
+
+    // Datastream annotations.
+    expect(typeof ds["@iot.id"]).toBe("number");
+    expect(ds["@iot.selfLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=sta`);
+    expect(ds.name).toBe(SENSORS.temperature.observedProperty.name);
+    expect(ds.resultTime).toBe(ds.phenomenonTime);
+    expect(ds.properties).toEqual({ seed: 2, frequency: SENSORS.temperature.frequency, generator: "sensors-api" });
+
+    // Related entities are expanded inline with matching ids.
+    expect(ds.Sensor["@iot.id"]).toBe(ds["@iot.id"]);
+    expect(ds.Sensor.encodingType).toBe("text/html");
+    expect(ds.Sensor.metadata).toMatch(/^https?:\/\//);
+    expect(ds.ObservedProperty.definition).toBe(SENSORS.temperature.observedProperty.definition);
+
+    // Observations navigation resolves to the real dataArray endpoint.
+    expect(ds["Observations@iot.navigationLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=dataArray`);
+    expect(ds["Observations@iot.count"]).toBe(points.length);
+    expect(ds.Observations[0]["@iot.id"]).toBe(1);
+    expect(ds.Observations[points.length - 1]["@iot.id"]).toBe(points.length);
+  });
+
+  it("nulls the unitOfMeasurement trio for unitless (category) sensors", () => {
+    const ds = formatSta("state", params(), generateWindow("state", params()), ORIGIN);
+    expect(ds.unitOfMeasurement).toEqual({ name: null, symbol: null, definition: null });
   });
 });
 

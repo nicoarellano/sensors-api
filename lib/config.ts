@@ -130,6 +130,8 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Electric_power",
     },
     noise: 0.08,
+    // Appliances and plant switching on and off through the day.
+    eventRate: 5,
     // Load curve: morning (~8h) and evening (~19h) peaks over a base load.
     shape: (h) => clamp01(0.12 + 0.88 * Math.max(bump(h, 8, 1.4), bump(h, 19, 2.2))),
   },
@@ -164,6 +166,8 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Carbon_dioxide",
     },
     noise: 0.05,
+    // Crowding: a meeting fills a room, CO2 climbs then clears.
+    eventRate: 3,
     // CO2 builds through occupied daytime hours, clears to ~fresh at night.
     shape: (h) => clamp01(0.04 + 0.92 * bump(h, 14, 4)),
   },
@@ -221,6 +225,8 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Volumetric_flow_rate",
     },
     noise: 0.04,
+    // Draw-offs: a tap or valve opening for a few minutes.
+    eventRate: 8,
     // Flat at night (long zero stretches), smooth daytime burst (~5.5h–20h).
     shape: (h) => Math.pow(daylight(h, 5.5, 20), 1.2),
   },
@@ -258,6 +264,8 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Sound_pressure",
     },
     noise: 0.06,
+    // Transients: a door, a vehicle, a dropped object.
+    eventRate: 12,
     // Quiet at night (~30 dB), loud through the day (~80 dB), peak mid-afternoon.
     shape: (h) => clamp01(0.1 + 0.9 * bump(h, 14, 5)),
   },

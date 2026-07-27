@@ -243,7 +243,8 @@ the stored `SensorType.unitOfMeasurement.symbol` when a payload carries no unit
 ## 10. Determinism
 
 Values come from a `mulberry32` PRNG seeded from `(seed, type, time bucket)` plus a
-diurnal shape and two noise layers (slow drift + fine jitter). The same
+diurnal shape, a per-seed profile (swing, level, peak timing, noisiness), four
+noise octaves (day / 3 h / 20 min / 15 s) and sparse events. The same
 `type + seed + timestamp + params` always yields the same value; time is evaluated in
 **UTC**. So `?at=` fixed URLs are reproducible in tests, while "now" URLs fluctuate
 gently between polls.

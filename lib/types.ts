@@ -50,6 +50,12 @@ export interface SensorConfig {
    */
   noise: number;
   /**
+   * Continuous kinds only. Average number of short bursts per day (a machine
+   * starting, a tap opening, a door slamming). Omit for sensors whose
+   * phenomenon is physically smooth (temperature, pressure, daylight).
+   */
+  eventRate?: number;
+  /**
    * Continuous kinds only. Baseline shape as a function of hour-of-day
    * (0..24), returning a normalized value in [0, 1]. Because it is
    * normalized, the shape stretches into whatever effective range is in
@@ -68,6 +74,21 @@ export interface SensorConfig {
    * function of hour-of-day. Need not sum to 1.
    */
   weights?: (hour: number) => number[];
+}
+
+/**
+ * The fixed personality of one (seed, type) pair. Derived from the seed, so two
+ * seeds read as two different physical sensors instead of the same curve twice.
+ */
+export interface SensorProfile {
+  /** Multiplier on the diurnal swing above the daily floor. */
+  gain: number;
+  /** Baseline shift in normalized units, faded out near the floor. */
+  level: number;
+  /** Hours the diurnal peak is shifted by (negative = earlier). */
+  phaseHours: number;
+  /** Multiplier on the sensor's configured noise amplitude. */
+  noiseScale: number;
 }
 
 /** A single sensor reading (used by `?format=reading`). */

@@ -8,10 +8,11 @@ available via `?format=`. Each value is computed from a timestamp plus a seeded
 PRNG, so the same URL is always reproducible and different seeds simulate
 different physical sensors.
 
-Values follow a realistic diurnal profile (a function of time-of-day) plus two
-layers of bounded, smooth seeded noise, and are always clamped to the effective
-range. Consecutive readings fluctuate gently instead of jittering or sitting
-still. There is no unbounded random walk.
+Values follow a realistic diurnal profile (a function of time-of-day), reshaped
+by a per-seed personality (swing, level, peak timing, noisiness) and layered
+with bounded, smooth seeded noise at four time scales, always inside the
+effective range. Consecutive readings fluctuate gently instead of jittering or
+sitting still. There is no unbounded random walk.
 
 ## Quick start
 
@@ -213,11 +214,26 @@ show in the tooltip; CSV encodes the ordinal index).
 Each value is produced by a small `mulberry32` PRNG seeded from a mix of
 `(seed, sensor type, time bucket)`:
 
-- **Continuous** sensors add two layers of smooth noise to a normalized diurnal
-  curve: a slow **drift** (2h control points, the daily character) plus a small
-  fast **jitter** (30s control points, per-reading measurement noise), split
-  ~70/30 and cosine-interpolated. Consecutive samples differ slightly while the
-  curve stays smooth. The result is scaled into the effective range and clamped.
+- **Continuous** sensors combine three things on top of the normalized diurnal
+  curve:
+  - a **profile** — a fixed personality per `(seed, type)`: swing amplitude
+    (`gain`), baseline shift (`level`), peak timing (`phaseHours` up to ±1.5 h)
+    and noisiness (`noiseScale`). This is what makes two seeds look like two
+    different physical sensors rather than one curve drawn twice.
+  - four **noise octaves** (day, 3 h, 20 min, 15 s), each cosine-interpolated
+    between seeded control points and weighted 0.30 / 0.28 / 0.24 / 0.18. The
+    day octave gives day-to-day character; the 15 s octave gives per-reading
+    measurement jitter.
+  - sparse **events** for sensors that declare an `eventRate` (bursts per day) —
+    short Gaussian spikes where they are physical: a machine starting
+    (`energy_consumption`), a tap opening (`flow`), a door slamming
+    (`noise_level`), a room filling up (`air_quality`).
+
+  The profile scales the swing *above the shape's daily floor*, and both noise
+  and events scale with how active the sensor is, so overnight behavior stays
+  physical for every seed (a dark room stays dark) while daytime values spread
+  out visibly. The result is scaled into the effective range and soft-clamped —
+  strong seeds round off near the ceiling instead of flat-lining against it.
 - **Discrete** sensors draw from a 1-second time bucket: `movement` compares the
   PRNG against a time-of-day probability; `state` picks a label by time-of-day
   weights.
@@ -282,7 +298,9 @@ my_sensor: {
 ```
 
 - `kind: "continuous"` → provide `shape(hour) => [0,1]`. Reuse the `diurnal`,
-  `daylight`, and `bump` helpers in the same file.
+  `daylight`, and `bump` helpers in the same file. Optionally add
+  `eventRate: n` (bursts per day) when short spikes are physical for that
+  phenomenon; leave it off for smooth ones (temperature, pressure, daylight).
 - `kind: "binary"` → provide `prob(hour) => [0,1]` and omit `shape`.
 - `kind: "enum"` → provide `values: string[]` and `weights(hour) => number[]`.
 

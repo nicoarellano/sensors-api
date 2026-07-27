@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   generateReading,
   generateWindow,
+  sensorProfile,
   MAX_POINTS,
 } from "@/lib/generator";
 import { SENSORS } from "@/lib/config";
@@ -165,6 +166,91 @@ describe("generateWindow — duration mode", () => {
     const spanMs = w[w.length - 1].at.getTime() - w[0].at.getTime();
     // Still covers roughly the whole day.
     expect(spanMs).toBeGreaterThan(23 * 3600 * 1000);
+  });
+});
+
+describe("sensorProfile — per-seed personality", () => {
+  it("is stable for a seed and different across seeds", () => {
+    expect(sensorProfile("energy_consumption", 3)).toEqual(
+      sensorProfile("energy_consumption", 3),
+    );
+    const a = sensorProfile("energy_consumption", 3);
+    const b = sensorProfile("energy_consumption", 4);
+    expect(a).not.toEqual(b);
+  });
+
+  it("keeps every seed within sane bounds", () => {
+    for (let seed = 0; seed < 40; seed++) {
+      const p = sensorProfile("energy_consumption", seed);
+      expect(p.gain).toBeGreaterThanOrEqual(0.5);
+      expect(p.gain).toBeLessThanOrEqual(1.15);
+      expect(Math.abs(p.level)).toBeLessThanOrEqual(0.06);
+      expect(Math.abs(p.phaseHours)).toBeLessThanOrEqual(1.5);
+      expect(p.noiseScale).toBeGreaterThanOrEqual(0.6);
+      expect(p.noiseScale).toBeLessThanOrEqual(1.8);
+    }
+  });
+});
+
+/** Day-long window of values for a seed, ending at midnight UTC. */
+function daySeries(type: Parameters<typeof generateWindow>[0], seed: number) {
+  return generateWindow(
+    type,
+    params({ seed, at: new Date("2026-07-27T23:59:00Z"), windowMs: 24 * 3600 * 1000 }),
+  );
+}
+
+function mean(values: number[]): number {
+  return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+describe("seed separation — different seeds read as different sensors", () => {
+  const SEEDS = [1, 2, 3, 4, 5];
+
+  it("spreads daytime energy levels well apart", () => {
+    const daytimeMeans = SEEDS.map((seed) =>
+      mean(
+        daySeries("energy_consumption", seed)
+          .filter((p) => p.at.getUTCHours() >= 8 && p.at.getUTCHours() < 20)
+          .map((p) => p.value as number),
+      ),
+    );
+    // The loudest seed draws at least 40% more than the quietest.
+    expect(Math.max(...daytimeMeans) / Math.min(...daytimeMeans)).toBeGreaterThan(1.4);
+  });
+
+  it("does not pin peaks flat against the ceiling", () => {
+    for (const seed of SEEDS) {
+      const values = daySeries("energy_consumption", seed).map((p) => p.value as number);
+      const atCeiling = values.filter((v) => v >= SENSORS.energy_consumption.max);
+      expect(atCeiling).toHaveLength(0);
+    }
+  });
+
+  it("keeps overnight behavior physical for every seed", () => {
+    for (const seed of SEEDS) {
+      const night = daySeries("energy_consumption", seed).filter(
+        (p) => p.at.getUTCHours() >= 1 && p.at.getUTCHours() < 4,
+      );
+      const day = daySeries("energy_consumption", seed).filter(
+        (p) => p.at.getUTCHours() >= 8 && p.at.getUTCHours() < 20,
+      );
+      expect(mean(night.map((p) => p.value as number))).toBeLessThan(
+        mean(day.map((p) => p.value as number)),
+      );
+    }
+  });
+
+  it("still leaves quiet-floored sensors dark at night", () => {
+    for (const seed of SEEDS) {
+      const night = daySeries("light", seed).filter(
+        (p) => p.at.getUTCHours() >= 22 || p.at.getUTCHours() < 4,
+      );
+      // A stray photon of noise is fine; a lit room at 3am is not.
+      for (const p of night) {
+        expect(p.value as number).toBeLessThan(SENSORS.light.max * 0.02);
+      }
+    }
   });
 });
 

@@ -48,17 +48,21 @@ natural frequency, ending at "now".
 
 #### Parameters
 
-| Param    | Type            | Default | Notes |
-|----------|-----------------|---------|-------|
-| `{type}` | path segment    | —       | Required. One of the sensor types below. Case-insensitive. |
-| `format` | enum            | `sta`   | `sta` \| `csv` \| `dataArray` \| `reading`. Invalid → 400. |
-| `points` | integer ≥ 1     | `288`   | Number of samples, spaced at the sensor's frequency. Capped at **1000**. Non-integer → 400. |
-| `window` | duration string | —       | Total span, e.g. `24h`, `90m`, `30s`, `1500ms`, or bare seconds. Samples at the sensor's frequency and **downsamples to ≤ 1000 points**. Overrides `points`. Invalid → 400. |
-| `seed`   | integer         | `0`     | Seeds a deterministic PRNG. Different seeds → different reproducible series. |
-| `min`    | number          | type default | Override the lower bound. May be supplied alone. |
-| `max`    | number          | type default | Override the upper bound. May be supplied alone. |
-| `at`     | ISO 8601 string | now     | End the window (or evaluate `reading`) at a specific instant instead of "now". A value with no zone designator is read in `tz`. |
-| `tz`     | timezone abbr   | `EDT`   | Timezone the series is timed in. Case-insensitive; `timezone=` is accepted as an alias. Explicit offsets (`UTC-05:00`, `-0500`) also work. Invalid → 400. |
+All parameters are URL search parameters and all are optional except the type
+itself. Anything malformed is a **400** carrying a message that names what was
+expected; unrecognized parameters are ignored.
+
+| Param    | Accepts         | Default | Description |
+|----------|-----------------|---------|-------------|
+| `{type}` | path segment    | required | Which sensor to simulate — one of the [sensor types](#sensor-types). Case-insensitive. An unknown type → 404 with the valid list. |
+| `format` | `sta` \| `csv` \| `dataArray` \| `reading` | `sta` | Response shape (see the [formats table](#formats)). Case-insensitive. Anything else → 400. |
+| `points` | integer ≥ 1     | `288`   | How many samples to return, spaced at the sensor's own `frequency`, ending at `at`. Capped at **1000**. Non-integer or < 1 → 400. |
+| `window` | duration string | —       | Return a span of wall-clock time instead of a sample count: `24h`, `90m`, `30s`, `1500ms`, or a bare number of seconds. Sampled at the sensor's frequency, then downsampled evenly to **≤ 1000 points**. Takes precedence over `points`. Unparseable or ≤ 0 → 400. |
+| `seed`   | integer         | `0`     | Picks *which* simulated sensor you get. The same seed always yields the same series; a different seed yields a different but equally reproducible one, with its own swing, baseline, peak timing and noisiness. Truncated to an integer; non-numeric → 400. |
+| `min`    | number          | type default | Override the bottom of the value range. The daily curve is **rescaled** into the new band rather than clipped. May be supplied without `max`. Ignored by `movement` and `state`. |
+| `max`    | number          | type default | Override the top of the value range. May be supplied without `min`. `min > max` → 400. |
+| `at`     | ISO 8601 instant | now    | End the window — or, with `format=reading`, evaluate the value — at a fixed instant instead of "now", which freezes a URL in time. A value with no zone designator (`2026-07-23T14:05:00`) is read in `tz`. Unparseable → 400. |
+| `tz`     | abbreviation or offset | `EDT` | Zone the series is timed in: it sets where the daily curve peaks *and* how timestamps are rendered. Any abbreviation listed by `GET /api/sensors` (`PDT`, `JST`, `UTC`, …, case-insensitive) or an explicit offset (`UTC-05:00`, `-0500`, `UTC+05:30`). `timezone=` is accepted as an alias. Unrecognized → 400. |
 
 **Timezone.** `tz` sets the zone that time-of-day is read in, so the diurnal
 curve peaks at **local** noon and not UTC noon: `?tz=PDT` gives a series that
@@ -371,3 +375,48 @@ database, so it deploys as-is.
 2. Import it at [vercel.com/new](https://vercel.com/new) — Vercel auto-detects
    Next.js; no configuration needed.
 3. Deploy. Endpoints are live at `https://<your-project>.vercel.app/api/sensor/...`.
+
+## Latest changes
+
+Newest first. Each item links to the section with the full reference.
+
+### Timezones (`?tz=`)
+
+A series can now be timed in any zone rather than always in UTC. `?tz=PDT` moves
+the diurnal peak to Pacific local noon, renders CSV times as a local clock, and
+stamps STA/`dataArray` timestamps with the zone offset (`…T10:05:00.000-04:00`)
+instead of `Z`. The default is `EDT`, `?timezone=` works as an alias, and a
+zoneless `at` is read in the requested zone so `?tz=JST&at=2026-07-23T09:00:00`
+means 09:00 in Tokyo.
+
+Abbreviations resolve to **fixed** offsets, never IANA zones with DST rules —
+that is what keeps a URL reproducible, and it means you pick the abbreviation for
+the season you are demoing (`EST` in winter, `EDT` in summer). `CST`/`CDT` are
+read as US Central; genuinely ambiguous ones like `IST` are rejected in favour of
+an explicit offset (`?tz=UTC%2B05:30`). `GET /api/sensors` lists every accepted
+abbreviation. See [Parameters](#parameters).
+
+### Seeds that look like different sensors
+
+Two seeds used to produce the same curve drawn twice. Each `(seed, type)` now
+gets a **profile** — swing amplitude, baseline shift, peak timing up to ±1.5 h,
+and noisiness — layered with seeded noise at **four time scales** (day, 3 h,
+20 min, 15 s) and, for sensors where a spike is physical, **sparse events**: a
+machine starting on `energy_consumption`, a tap opening on `flow`, a door
+slamming on `noise_level`, a room filling up on `air_quality`.
+
+Swing scales above the shape's daily floor and both noise and events scale with
+how active the sensor is, so overnight behavior stays physical for every seed (a
+dark room stays dark) while daytime values spread out visibly. Peaks are
+soft-clamped, so a strong seed rounds off near the ceiling instead of
+flat-lining against it. See [How seeding works](#how-seeding-works).
+
+### OGC SensorThings as the default response
+
+The bare URL returns a SensorThings **Datastream** — `unitOfMeasurement`,
+`observationType`, an inline `Sensor` and `ObservedProperty`, `@iot.*`
+annotations, and embedded `Observations` — so a CollabDT sensor set to
+`dataFormat = Json` picks up the unit automatically with no extra configuration.
+CSV is unchanged but now lives behind `?format=csv`. See
+[STA response](#sta-response-default) and
+[`docs/ogc-sensorthings-integration.md`](docs/ogc-sensorthings-integration.md).

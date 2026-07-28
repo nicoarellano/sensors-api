@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface ManifestEntry {
   type: string;
@@ -26,6 +26,175 @@ interface Point {
 const LIVE = ["temperature", "flow", "humidity", "energy_consumption"];
 const POLL_MS = 4000;
 const TILE_POINTS = 120;
+
+/** Inline code, for parameter names and literal values inside prose. */
+function M({ children }: { children: ReactNode }) {
+  return <span className="font-mono">{children}</span>;
+}
+
+interface ParamDoc {
+  name: string;
+  type: string;
+  fallback: string;
+  desc: ReactNode;
+}
+
+/**
+ * Reference for every URL search parameter `/api/sensor/{type}` accepts. Kept in
+ * sync with the validation in lib/params.ts — anything not listed here is ignored.
+ */
+const PARAMS: ParamDoc[] = [
+  {
+    name: "{type}",
+    type: "path segment",
+    fallback: "required",
+    desc: (
+      <>
+        Which sensor to simulate — one of the types in the table above.
+        Case-insensitive. An unknown type returns 404 with the valid list.
+      </>
+    ),
+  },
+  {
+    name: "format",
+    type: "sta | csv | dataArray | reading",
+    fallback: "sta",
+    desc: (
+      <>
+        Response shape. <M>sta</M> is an OGC SensorThings Datastream with embedded
+        Observations, <M>csv</M> is header-less <M>time,value</M> rows,{" "}
+        <M>dataArray</M> is the compact OGC <M>{"{components, dataArray}"}</M> form,
+        and <M>reading</M> is a single latest value.
+      </>
+    ),
+  },
+  {
+    name: "points",
+    type: "integer ≥ 1",
+    fallback: "288",
+    desc: (
+      <>
+        How many samples to return, spaced at the sensor&apos;s own frequency. Capped
+        at 1000.
+      </>
+    ),
+  },
+  {
+    name: "window",
+    type: "duration",
+    fallback: "—",
+    desc: (
+      <>
+        Return a span of time instead of a sample count: <M>24h</M>, <M>90m</M>,{" "}
+        <M>30s</M>, <M>1500ms</M>, or bare seconds. Sampled at the sensor&apos;s
+        frequency, then downsampled evenly to at most 1000 points. Overrides{" "}
+        <M>points</M>.
+      </>
+    ),
+  },
+  {
+    name: "seed",
+    type: "integer",
+    fallback: "0",
+    desc: (
+      <>
+        Picks which simulated sensor you get. The same seed always returns the same
+        series; a different seed gives a different one — its own swing, baseline,
+        peak timing and noisiness.
+      </>
+    ),
+  },
+  {
+    name: "min",
+    type: "number",
+    fallback: "per type",
+    desc: (
+      <>
+        Override the bottom of the value range. The daily curve is rescaled into the
+        new band rather than clipped, and may be given without <M>max</M>. Ignored by{" "}
+        <M>movement</M> and <M>state</M>.
+      </>
+    ),
+  },
+  {
+    name: "max",
+    type: "number",
+    fallback: "per type",
+    desc: (
+      <>
+        Override the top of the value range. <M>min</M> greater than <M>max</M> is a
+        400.
+      </>
+    ),
+  },
+  {
+    name: "at",
+    type: "ISO 8601 instant",
+    fallback: "now",
+    desc: (
+      <>
+        End the window (or evaluate <M>reading</M>) at a fixed instant instead of
+        &quot;now&quot;, which freezes a URL in time. A value with no zone designator
+        is read in <M>tz</M>.
+      </>
+    ),
+  },
+  {
+    name: "tz",
+    type: "abbreviation or offset",
+    fallback: "EDT",
+    desc: (
+      <>
+        Zone the series is timed in: it sets where the daily curve peaks and how
+        timestamps are rendered. Any abbreviation from{" "}
+        <M>/api/sensors</M> (<M>PDT</M>, <M>JST</M>, <M>UTC</M>, case-insensitive) or
+        an explicit offset (<M>UTC-05:00</M>, <M>-0500</M>). Fixed offsets, so no DST
+        transitions apply. <M>timezone</M> is accepted as an alias.
+      </>
+    ),
+  },
+];
+
+/** Notable changes, newest first — see the README for the full reference. */
+const CHANGES: { title: string; body: ReactNode }[] = [
+  {
+    title: "Timezones",
+    body: (
+      <>
+        A series can be timed in any zone with <M>?tz=</M> (or <M>?timezone=</M>), so
+        the daily curve peaks at local noon instead of UTC noon and timestamps carry
+        the zone offset. Abbreviations resolve to fixed offsets — pick the one for the
+        season you are demoing (<M>EST</M> in winter, <M>EDT</M> in summer) — and
+        explicit offsets like <M>UTC+05:30</M> cover the ambiguous ones. Defaults to{" "}
+        <M>EDT</M>.
+      </>
+    ),
+  },
+  {
+    title: "Seeds that look like different sensors",
+    body: (
+      <>
+        Each <M>(seed, type)</M> now gets a personality — swing, baseline, peak timing
+        up to ±1.5 h, noisiness — layered with seeded noise at four time scales (day,
+        3 h, 20 min, 15 s) and sparse events where a spike is physical: a machine
+        starting, a tap opening, a door slamming. Strong seeds round off near the
+        ceiling instead of flat-lining against it, and overnight behavior stays
+        physical for every seed.
+      </>
+    ),
+  },
+  {
+    title: "OGC SensorThings by default",
+    body: (
+      <>
+        The bare URL returns a Datastream carrying <M>unitOfMeasurement</M>,{" "}
+        <M>observationType</M>, inline <M>Sensor</M> and <M>ObservedProperty</M>, and
+        embedded <M>Observations</M>, so a CollabDT sensor picks up the unit
+        automatically. CSV moved behind <M>?format=csv</M>.
+      </>
+    ),
+  },
+];
 
 /** Parse header-less `time,value` CSV exactly as the CollabDT components do. */
 function parseCsv(text: string): Point[] {
@@ -238,6 +407,48 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="flex flex-col gap-4">
+        <h2 className="text-sm uppercase tracking-wide text-foreground/50">Parameters</h2>
+        <p className="text-sm text-foreground/60 max-w-2xl">
+          Every parameter is a URL search parameter on{" "}
+          <span className="font-mono">/api/sensor/{"{type}"}</span> and every one is
+          optional except the type itself. A malformed value is a 400 with a message
+          saying what was expected, never a silently wrong series.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr className="text-left text-foreground/50 border-b border-black/10 dark:border-white/15">
+                <th className="py-2 pr-4 font-medium">Param</th>
+                <th className="py-2 pr-4 font-medium">Accepts</th>
+                <th className="py-2 pr-4 font-medium">Default</th>
+                <th className="py-2 font-medium">Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PARAMS.map((p) => (
+                <tr key={p.name} className="border-b border-black/5 dark:border-white/10 align-top">
+                  <td className="py-2 pr-4 font-mono whitespace-nowrap">{p.name}</td>
+                  <td className="py-2 pr-4 font-mono text-xs text-foreground/50">{p.type}</td>
+                  <td className="py-2 pr-4 font-mono text-xs text-foreground/50 whitespace-nowrap">
+                    {p.fallback}
+                  </td>
+                  <td className="py-2 text-foreground/70 min-w-[20rem]">{p.desc}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-sm text-foreground/60 max-w-2xl">
+          The same type, seed, timestamp and parameters always produce the same value,
+          so any URL with an explicit <span className="font-mono">at</span> is
+          reproducible. Discrete sensors are the one exception to the range
+          parameters: <span className="font-mono">movement</span> is 0/1 and{" "}
+          <span className="font-mono">state</span> draws from its labels, which CSV
+          encodes as the ordinal index so it charts as a step line.
+        </p>
+      </section>
+
       <section className="flex flex-col gap-3">
         <h2 className="text-sm uppercase tracking-wide text-foreground/50">Example endpoints</h2>
         <ul className="flex flex-col gap-1.5 font-mono text-sm">
@@ -249,6 +460,7 @@ export default function Home() {
             "/api/sensor/temperature?format=reading",
             "/api/sensor/temperature?seed=2&min=-20&max=50",
             "/api/sensor/temperature?window=24h",
+            "/api/sensor/temperature?at=2026-07-23T14:05:00Z",
             "/api/sensor/flow?seed=7&window=24h&format=csv",
             "/api/sensor/state?format=csv",
             "/api/sensor/temperature?tz=PDT&window=24h&format=csv",
@@ -261,6 +473,18 @@ export default function Home() {
             </li>
           ))}
         </ul>
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <h2 className="text-sm uppercase tracking-wide text-foreground/50">Latest changes</h2>
+        <div className="flex flex-col gap-4 max-w-2xl">
+          {CHANGES.map((c) => (
+            <div key={c.title} className="flex flex-col gap-1">
+              <h3 className="text-sm font-medium">{c.title}</h3>
+              <p className="text-sm text-foreground/60">{c.body}</p>
+            </div>
+          ))}
+        </div>
       </section>
     </main>
   );

@@ -42,3 +42,22 @@ export function mixSeed(...nums: number[]): number {
   }
   return h >>> 0;
 }
+
+/**
+ * Cosine-interpolated seeded value in [-1, 1] along a continuous axis, with one
+ * control point at every integer of `indexFloat`. Smooth and continuous
+ * everywhere, so a series built from it drifts rather than jumping — and it is
+ * continuous across midnight, unlike anything keyed on hour-of-day.
+ *
+ * `seedParts` identify the series; the control-point index is mixed in last.
+ */
+export function smoothNoise(indexFloat: number, ...seedParts: number[]): number {
+  const i0 = Math.floor(indexFloat);
+  const frac = indexFloat - i0;
+  const controlPoint = (i: number): number =>
+    mulberry32(mixSeed(...seedParts, i))() * 2 - 1;
+  const a = controlPoint(i0);
+  const b = controlPoint(i0 + 1);
+  const ease = (1 - Math.cos(frac * Math.PI)) / 2;
+  return a + (b - a) * ease;
+}

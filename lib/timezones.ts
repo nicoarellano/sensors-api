@@ -138,6 +138,53 @@ export function resolveTimezone(raw: string): Timezone | null {
   };
 }
 
+/** Minutes in a day. */
+const DAY_MS = 86400000;
+
+/**
+ * The calendar fields a diurnal/seasonal model needs, read in the zone's fixed
+ * offset rather than the server's zone so results depend only on the URL.
+ */
+export interface LocalParts {
+  /** Hour of day in [0, 24) as a float, truncated to whole seconds. */
+  hour: number;
+  /** Day of year, 1 on January 1st (366 in a leap year). */
+  dayOfYear: number;
+  /** Day of week, 0 = Sunday. */
+  dayOfWeek: number;
+  /** True on Saturday or Sunday. */
+  isWeekend: boolean;
+}
+
+/** Decompose an instant into local calendar fields at a fixed UTC offset. */
+export function localParts(at: Date, offsetMinutes: number): LocalParts {
+  // Shifting the instant lets the UTC getters read local fields directly.
+  const local = new Date(at.getTime() + offsetMinutes * 60000);
+  const hour =
+    (local.getUTCHours() * 3600 +
+      local.getUTCMinutes() * 60 +
+      local.getUTCSeconds()) /
+    3600;
+  const yearStart = Date.UTC(local.getUTCFullYear(), 0, 1);
+  const dayOfYear = Math.floor((local.getTime() - yearStart) / DAY_MS) + 1;
+  const dayOfWeek = local.getUTCDay();
+  return {
+    hour,
+    dayOfYear,
+    dayOfWeek,
+    isWeekend: dayOfWeek === 0 || dayOfWeek === 6,
+  };
+}
+
+/**
+ * Longitude of a zone's central meridian: 15° per hour of offset. Used as the
+ * default longitude so that, absent an explicit `lon`, solar noon lands on
+ * local clock noon for whatever zone was requested.
+ */
+export function meridianLongitude(offsetMinutes: number): number {
+  return offsetMinutes / 4;
+}
+
 /**
  * The same instant expressed as an ISO 8601 string in the zone's offset, e.g.
  * `2026-07-23T10:05:00.000-04:00`. Zero offset keeps the `Z` spelling.

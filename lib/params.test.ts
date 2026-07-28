@@ -8,13 +8,15 @@ function parse(qs: string) {
 }
 
 describe("parseParams — defaults", () => {
-  it("defaults to seed 0, now, sta format, no window overrides", () => {
+  it("defaults to seed 0, now, sta format, EDT, no window overrides", () => {
     const r = parse("");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.seed).toBe(0);
     expect(r.value.at.toISOString()).toBe(NOW.toISOString());
     expect(r.value.format).toBe("sta");
+    expect(r.value.timezone).toBe("EDT");
+    expect(r.value.offsetMinutes).toBe(-240);
     expect(r.value.points).toBeUndefined();
     expect(r.value.windowMs).toBeUndefined();
     expect(r.value.min).toBeUndefined();
@@ -42,6 +44,56 @@ describe("parseParams — seed / min / max / at", () => {
     const r = parse("at=2026-07-23T14:05:00Z");
     expect(r.ok && r.value.at.toISOString()).toBe("2026-07-23T14:05:00.000Z");
     expect(parse("at=not-a-date").ok).toBe(false);
+  });
+
+  it("reads an at without a zone designator in the requested timezone", () => {
+    // 14:05 EDT is 18:05Z.
+    const edt = parse("at=2026-07-23T14:05:00");
+    expect(edt.ok && edt.value.at.toISOString()).toBe("2026-07-23T18:05:00.000Z");
+    const jst = parse("at=2026-07-23T14:05:00&tz=JST");
+    expect(jst.ok && jst.value.at.toISOString()).toBe("2026-07-23T05:05:00.000Z");
+    // Date-only means local midnight in that zone.
+    const day = parse("at=2026-07-23&tz=UTC");
+    expect(day.ok && day.value.at.toISOString()).toBe("2026-07-23T00:00:00.000Z");
+  });
+
+  it("respects an explicit zone designator on at over tz", () => {
+    const r = parse("at=2026-07-23T14:05:00Z&tz=PDT");
+    expect(r.ok && r.value.at.toISOString()).toBe("2026-07-23T14:05:00.000Z");
+    expect(r.ok && r.value.timezone).toBe("PDT");
+  });
+});
+
+describe("parseParams — tz", () => {
+  it("accepts an abbreviation in any case", () => {
+    for (const qs of ["tz=edt", "tz=EDT", "tz=Edt"]) {
+      const r = parse(qs);
+      expect(r.ok && r.value.timezone).toBe("EDT");
+      expect(r.ok && r.value.offsetMinutes).toBe(-240);
+    }
+  });
+
+  it("accepts the timezone alias, lower or upper case", () => {
+    expect(parse("timezone=edt").ok && (parse("timezone=edt") as { value: { timezone: string } }).value.timezone).toBe("EDT");
+    const pst = parse("timezone=PST");
+    expect(pst.ok && pst.value.offsetMinutes).toBe(-480);
+  });
+
+  it("prefers tz when both spellings are present", () => {
+    const r = parse("tz=UTC&timezone=PST");
+    expect(r.ok && r.value.timezone).toBe("UTC");
+  });
+
+  it("accepts an explicit offset", () => {
+    const r = parse("tz=UTC-05:00");
+    expect(r.ok && r.value.timezone).toBe("UTC-05:00");
+    expect(r.ok && r.value.offsetMinutes).toBe(-300);
+  });
+
+  it("rejects an unknown zone with a 400-able error listing the abbreviations", () => {
+    const r = parse("tz=Mars");
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toContain("EDT");
   });
 });
 

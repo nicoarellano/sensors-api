@@ -3,6 +3,12 @@
 
 import type { OutputFormat, ParseResult } from "@/lib/types";
 import { MAX_POINTS } from "@/lib/generator";
+import {
+  DEFAULT_ZONE,
+  TIMEZONE_ABBREVIATIONS,
+  offsetDesignator,
+  resolveTimezone,
+} from "@/lib/timezones";
 
 const FORMATS: Record<string, OutputFormat> = {
   csv: "csv",
@@ -33,6 +39,21 @@ function parseDuration(raw: string): number | null {
   if (!Number.isFinite(value) || value <= 0) return null;
   const unit = m[2] ? DURATION_UNITS[m[2]] : DURATION_UNITS.s; // bare => seconds
   return value * unit;
+}
+
+/**
+ * A date or date-time with no zone designator, e.g. `2026-07-23T14:05:00` or
+ * `2026-07-23`. Such a value is read in the requested timezone rather than
+ * UTC (or, worse, the server's zone) so `at` means what the caller wrote.
+ */
+const ZONELESS_AT = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?))?$/;
+
+/** Attach `offsetMinutes` to an `at` value that carries no zone of its own. */
+function withZone(raw: string, offsetMinutes: number): string {
+  const m = ZONELESS_AT.exec(raw.trim());
+  if (!m) return raw;
+  const time = m[2] ?? "00:00:00";
+  return `${m[1]}T${time}${offsetDesignator(offsetMinutes)}`;
 }
 
 /**
@@ -80,11 +101,26 @@ export function parseParams(
     };
   }
 
-  // at (ISO 8601, defaults to now)
+  // tz (abbreviation or explicit offset; EDT by default)
+  let zone = DEFAULT_ZONE;
+  const rawTz = searchParams.get("tz") ?? searchParams.get("timezone");
+  if (rawTz !== null) {
+    const resolved = resolveTimezone(rawTz);
+    if (!resolved) {
+      return {
+        ok: false,
+        error: `Invalid tz "${rawTz}": use an abbreviation (${TIMEZONE_ABBREVIATIONS.join(", ")}) or an offset like UTC-05:00, -0500.`,
+      };
+    }
+    zone = resolved;
+  }
+
+  // at (ISO 8601, defaults to now). A value without a zone designator is read
+  // in the requested timezone.
   let at = now;
   if (searchParams.has("at")) {
     const raw = searchParams.get("at") ?? "";
-    const parsed = new Date(raw);
+    const parsed = new Date(withZone(raw, zone.offsetMinutes));
     if (Number.isNaN(parsed.getTime())) {
       return {
         ok: false,
@@ -136,5 +172,18 @@ export function parseParams(
     windowMs = ms;
   }
 
-  return { ok: true, value: { seed, min, max, at, format, points, windowMs } };
+  return {
+    ok: true,
+    value: {
+      seed,
+      min,
+      max,
+      at,
+      format,
+      points,
+      windowMs,
+      timezone: zone.label,
+      offsetMinutes: zone.offsetMinutes,
+    },
+  };
 }

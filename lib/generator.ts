@@ -19,6 +19,7 @@
 
 import { SENSORS, type SensorType } from "@/lib/config";
 import { mulberry32, hashString, mixSeed } from "@/lib/prng";
+import { isoWithOffset } from "@/lib/timezones";
 import type {
   Reading,
   SensorConfig,
@@ -91,9 +92,15 @@ function saturate(x: number, softLow: boolean): number {
   return clamp(y, 0, 1);
 }
 
-/** Hour-of-day in [0, 24) as a float, in UTC for cross-timezone determinism. */
-function hourOfDay(at: Date): number {
-  return at.getUTCHours() + at.getUTCMinutes() / 60 + at.getUTCSeconds() / 3600;
+/**
+ * Hour-of-day in [0, 24) as a float, read in the requested zone's fixed offset
+ * (see lib/timezones.ts) rather than the server's zone, so the result depends
+ * only on the URL. `offsetMinutes` 0 gives UTC hour-of-day.
+ */
+function hourOfDay(at: Date, offsetMinutes: number): number {
+  const local = at.getTime() + offsetMinutes * 60000;
+  const intoDay = ((local % DAY_MS) + DAY_MS) % DAY_MS;
+  return Math.floor(intoDay / 1000) / 3600;
 }
 
 /** Wrap an hour offset back into [0, 24). */
@@ -192,20 +199,23 @@ export function sensorProfile(type: SensorType, seed: number): SensorProfile {
 
 /**
  * Sparse Gaussian bursts in normalized units, for sensors that configure an
- * `eventRate` (events per day). Neighboring days are included so a burst that
- * straddles midnight is not cut in half.
+ * `eventRate` (events per day). Days and burst centers are local to the
+ * requested zone, so a "busy day" lines up with the local calendar day and a
+ * burst placed at 08:00 lands at 08:00 local. Neighboring days are included so
+ * a burst that straddles midnight is not cut in half.
  */
 function eventBoost(
   seed: number,
   type: SensorType,
   at: Date,
   amplitudeUnit: number,
+  offsetMinutes: number,
 ): number {
   const rate = configOf(type).eventRate;
   if (!rate) return 0;
 
   const typeHash = hashString(type);
-  const t = at.getTime();
+  const t = at.getTime() + offsetMinutes * 60000;
   const dayIndex = Math.floor(t / DAY_MS);
   let boost = 0;
 
@@ -252,7 +262,7 @@ export function computeValue(
   at: Date,
 ): number | string {
   const cfg = SENSORS[type];
-  const hour = hourOfDay(at);
+  const hour = hourOfDay(at, params.offsetMinutes);
 
   if (cfg.kind === "binary") {
     const p = cfg.prob ? cfg.prob(hour) : 0;
@@ -291,7 +301,13 @@ export function computeValue(
   const activity = quiet ? 0.1 + 0.9 * base : 0.55 + 0.45 * base;
   const noiseUnit = cfg.noise * profile.noiseScale * activity;
   const noise = noiseUnit * layeredNoise(params.seed, type, at);
-  const events = eventBoost(params.seed, type, at, cfg.noise * activity);
+  const events = eventBoost(
+    params.seed,
+    type,
+    at,
+    cfg.noise * activity,
+    params.offsetMinutes,
+  );
 
   const normalized = saturate(floor + swing + levelTerm + noise + events, !quiet);
   const value = min + normalized * (max - min);
@@ -307,7 +323,8 @@ export function generateReading(type: SensorType, params: SensorParams): Reading
     type,
     unit: cfg.unit,
     seed: params.seed,
-    timestamp: params.at.toISOString(),
+    timestamp: isoWithOffset(params.at, params.offsetMinutes),
+    timezone: params.timezone,
     value,
   };
   if (cfg.kind === "continuous") {

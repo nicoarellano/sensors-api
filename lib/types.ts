@@ -96,7 +96,10 @@ export interface Reading {
   type: string;
   unit: string;
   seed: number;
+  /** ISO 8601 instant carrying the requested zone's offset. */
   timestamp: string;
+  /** Timezone the timestamp and the diurnal curve are expressed in. */
+  timezone: string;
   value: number | string;
   /** Present for continuous sensors only (effective range). */
   min?: number;
@@ -125,6 +128,14 @@ export interface SensorParams {
   at: Date;
   /** Requested output representation. */
   format: OutputFormat;
+  /**
+   * Timezone label the series is expressed in (e.g. `EDT`). Time-of-day is read
+   * in this zone, so the diurnal curve peaks at local — not UTC — noon, and
+   * emitted timestamps carry its offset.
+   */
+  timezone: string;
+  /** Fixed offset of `timezone` from UTC in minutes (EDT = -240). */
+  offsetMinutes: number;
   /** Number of points to return (points-based window). */
   points?: number;
   /** Total span in milliseconds (duration-based window); overrides `points`. */

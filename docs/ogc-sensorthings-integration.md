@@ -42,7 +42,19 @@ GET /api/sensor/{type}?format={sta|csv|dataArray|reading}&…
 | `seed`   | integer         | `0`     | Deterministic PRNG seed. Same seed+time+params ⇒ same values. |
 | `min`    | number          | type default | Override the lower bound (continuous only). |
 | `max`    | number          | type default | Override the upper bound (continuous only). |
-| `at`     | ISO 8601        | now     | End the window at a fixed instant (for reproducible tests). |
+| `at`     | ISO 8601        | now     | End the window at a fixed instant (for reproducible tests). Without a zone designator it is read in `tz`. |
+| `tz`     | timezone abbr   | `EDT`   | Zone the series is timed in. Case-insensitive; `timezone=` is an accepted alias; explicit offsets (`UTC-05:00`, `-0500`) work too. Invalid → 400. |
+
+**Timezone.** `tz` is a **fixed offset** named by abbreviation (`EST` vs `EDT`,
+no DST transition rules), which keeps a URL reproducible. It does two things:
+time-of-day for the diurnal curve is read in that zone, and timestamps are
+rendered in it — `phenomenonTime`/`resultTime` carry the offset
+(`2026-07-23T10:05:00.000-04:00`) instead of `Z`, and CSV `H:MM:SS` becomes a
+local clock. The instants are unchanged, so `new Date(iso)` still gives the
+correct absolute time. The zone is echoed at `properties.timezone` and appended
+to the `@iot.selfLink`/`@iot.navigationLink` URLs so following a link reproduces
+the same series. `GET /api/sensors` lists the accepted abbreviations
+(`timezones`) and the default (`defaultTimezone`).
 
 **History + live from one URL.** Every window ends at "now" and rolls forward,
 anchored to frequency-sized buckets. Store the URL once; re-fetch on the poll
@@ -57,7 +69,7 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
 ```jsonc
 {
   "@iot.id": 1,
-  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta",
+  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
   "name": "Air Temperature",
   "description": "Synthetic Air Temperature datastream for temperature.",
   "observationType": "http://www.opengis.net/def/observationType/OGC-OM/2.0/OM_Measurement",
@@ -66,11 +78,11 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
     "symbol": "°C",
     "definition": "https://qudt.org/vocab/unit/DEG_C"
   },
-  "phenomenonTime": "2026-07-23T14:30:00.000Z/2026-07-24T14:30:00.000Z",
-  "resultTime":     "2026-07-23T14:30:00.000Z/2026-07-24T14:30:00.000Z",
-  "properties": { "seed": 0, "frequency": 300000, "generator": "sensors-api" },
+  "phenomenonTime": "2026-07-23T10:30:00.000-04:00/2026-07-24T10:30:00.000-04:00",
+  "resultTime":     "2026-07-23T10:30:00.000-04:00/2026-07-24T10:30:00.000-04:00",
+  "properties": { "seed": 0, "frequency": 300000, "generator": "sensors-api", "timezone": "EDT" },
 
-  "Sensor@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta",
+  "Sensor@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
   "Sensor": {
     "@iot.id": 1,
     "name": "Synthetic temperature sensor",
@@ -79,7 +91,7 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
     "metadata": "https://github.com/nicoarellano/sensors-api"
   },
 
-  "ObservedProperty@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta",
+  "ObservedProperty@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
   "ObservedProperty": {
     "@iot.id": 1,
     "name": "Air Temperature",
@@ -87,13 +99,13 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
     "description": "Air Temperature"
   },
 
-  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray",
+  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray&tz=EDT",
   "Observations@iot.count": 288,
   "Observations": [
     {
       "@iot.id": 1,
-      "phenomenonTime": "2026-07-23T14:30:00.000Z",
-      "resultTime": "2026-07-23T14:30:00.000Z",
+      "phenomenonTime": "2026-07-23T10:30:00.000-04:00",
+      "resultTime": "2026-07-23T10:30:00.000-04:00",
       "result": 23.71
     }
   ]
@@ -109,8 +121,8 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
 | `name`, `description` | string | Human labels. `name` is the observed property name; safe as a chart title. |
 | `observationType` | string (URI) | OGC OM type; see §7. Tells you the `result` type. |
 | `unitOfMeasurement` | `{ name, symbol, definition }` | UCUM/QUDT unit. **All three are `null`** for unitless kinds (`movement`, `state`). `symbol` is what you show on the chart. |
-| `phenomenonTime` / `resultTime` | string | ISO 8601 **interval** `start/end` covering the window. Use for the chart's time-axis domain. |
-| `properties` | object | Non-standard extras under the standard `properties` bag: `seed`, `frequency` (ms), `generator`. (Phase 2: CDT display hints will land here / on a Thing — see §8.) |
+| `phenomenonTime` / `resultTime` | string | ISO 8601 **interval** `start/end` covering the window, in the `tz` offset. Use for the chart's time-axis domain. |
+| `properties` | object | Non-standard extras under the standard `properties` bag: `seed`, `frequency` (ms), `generator`, `timezone` (the `tz` in force). (Phase 2: CDT display hints will land here / on a Thing — see §8.) |
 | `Sensor` | entity | The generating procedure. `encodingType`/`metadata` follow STA; `metadata` is the repo URL. |
 | `ObservedProperty` | entity | `name` + `definition` (phenomenon IRI). Good source for a series label. |
 | `Observations@iot.count` | number | Number of embedded observations. |
@@ -132,8 +144,8 @@ The OGC `dataArray` extension: the same observations as rows, no per-row keys.
   "components": ["phenomenonTime", "result"],
   "dataArray@iot.count": 288,
   "dataArray": [
-    ["2026-07-24T13:41:00.000Z", 23.71],
-    ["2026-07-24T13:46:00.000Z", 23.68]
+    ["2026-07-24T09:41:00.000-04:00", 23.71],
+    ["2026-07-24T09:46:00.000-04:00", 23.68]
   ]
 }
 ```
@@ -143,19 +155,19 @@ The OGC `dataArray` extension: the same observations as rows, no per-row keys.
 
 ## 5. `format=csv` and `format=reading`
 
-**CSV** — header-less, one point per line; `time` is clock-style UTC `H:MM:SS`;
-`value` is `parseFloat`-able for every kind (`state` → ordinal index).
+**CSV** — header-less, one point per line; `time` is clock-style `H:MM:SS` local
+to `tz`; `value` is `parseFloat`-able for every kind (`state` → ordinal index).
 
 ```
-14:30:00,23.71
-14:35:00,23.68
+10:30:00,23.71
+10:35:00,23.68
 ```
 
 **reading** — one current value:
 
 ```jsonc
-{ "type": "temperature", "unit": "°C", "seed": 0,
-  "timestamp": "2026-07-24T10:55:17.465Z", "value": 26.61, "min": 15, "max": 30 }
+{ "type": "temperature", "unit": "°C", "seed": 0, "timezone": "EDT",
+  "timestamp": "2026-07-24T06:55:17.465-04:00", "value": 26.61, "min": 15, "max": 30 }
 ```
 
 ## 6. Sensor types
@@ -199,8 +211,11 @@ subset you use and ignore unknown keys — that is what keeps you forward-compat
    - has `result`/`value` (no arrays) → single reading; unit = `unit ?? unitOfMeasurement?.symbol`.
 2. **Coerce `result`** for the chart: number → as-is; boolean → `0/1`; category
    string → stable first-seen ordinal (keep a label map for the tooltip).
-3. **Time** → convert each ISO `phenomenonTime` to your chart's `H:MM:SS` UTC clock
-   string. Use the Datastream `phenomenonTime` interval for the axis domain.
+3. **Time** → parse each ISO `phenomenonTime` (it carries the `tz` offset, so
+   `new Date(...)` is exact) and format your chart's `H:MM:SS` from it. To keep the
+   chart on the sensor's local clock without doing the conversion yourself, request
+   the zone with `?tz=` and read the wall time straight out of the string. Use the
+   Datastream `phenomenonTime` interval for the axis domain.
 4. **Labels** → use `ObservedProperty.name` (or `Datastream.name`) as the series
    title; `unitOfMeasurement.symbol` for the value axis/tooltip.
 5. **Polling** → re-fetch the stored URL every `updateFrequency` ms (floor 1000 ms)
@@ -245,6 +260,8 @@ the stored `SensorType.unitOfMeasurement.symbol` when a payload carries no unit
 Values come from a `mulberry32` PRNG seeded from `(seed, type, time bucket)` plus a
 diurnal shape, a per-seed profile (swing, level, peak timing, noisiness), four
 noise octaves (day / 3 h / 20 min / 15 s) and sparse events. The same
-`type + seed + timestamp + params` always yields the same value; time is evaluated in
-**UTC**. So `?at=` fixed URLs are reproducible in tests, while "now" URLs fluctuate
-gently between polls.
+`type + seed + timestamp + params` always yields the same value; time-of-day is
+evaluated at the fixed offset of `tz` (**EDT** by default), never in the server's
+zone. So `?at=` fixed URLs are reproducible in tests, while "now" URLs fluctuate
+gently between polls. `tz` is part of the input: the same URL with a different
+`tz` is a different (but equally reproducible) series.

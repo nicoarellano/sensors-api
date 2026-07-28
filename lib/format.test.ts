@@ -7,9 +7,20 @@ import type { SensorParams } from "@/lib/types";
 const AT = new Date("2026-07-23T14:05:00Z");
 const ORIGIN = "https://sensors.example";
 
+/** Base params; UTC unless a test is specifically about the timezone. */
 function params(overrides: Partial<SensorParams> = {}): SensorParams {
-  return { seed: 2, at: AT, format: "csv", points: 20, ...overrides };
+  return {
+    seed: 2,
+    at: AT,
+    format: "csv",
+    points: 20,
+    timezone: "UTC",
+    offsetMinutes: 0,
+    ...overrides,
+  };
 }
+
+const EDT = params({ timezone: "EDT", offsetMinutes: -240 });
 
 /** Replicates the exact parser in core-local Sensor.tsx / CollapsibleSensorItem.tsx. */
 function parseLikeCdt(csv: string): { time: string; value: number }[] {
@@ -24,15 +35,22 @@ function parseLikeCdt(csv: string): { time: string; value: number }[] {
 
 describe("clockTime", () => {
   it("formats UTC as H:MM:SS (single-digit hour, zero-padded min/sec)", () => {
-    expect(clockTime(new Date("2026-07-23T00:00:00Z"))).toBe("0:00:00");
-    expect(clockTime(new Date("2026-07-23T14:30:05Z"))).toBe("14:30:05");
-    expect(clockTime(new Date("2026-07-23T09:05:00Z"))).toBe("9:05:00");
+    expect(clockTime(new Date("2026-07-23T00:00:00Z"), 0)).toBe("0:00:00");
+    expect(clockTime(new Date("2026-07-23T14:30:05Z"), 0)).toBe("14:30:05");
+    expect(clockTime(new Date("2026-07-23T09:05:00Z"), 0)).toBe("9:05:00");
+  });
+
+  it("shifts by the zone offset, wrapping across midnight", () => {
+    expect(clockTime(new Date("2026-07-23T14:30:05Z"), -240)).toBe("10:30:05");
+    expect(clockTime(new Date("2026-07-23T14:30:05Z"), 330)).toBe("20:00:05");
+    // 02:00Z is the previous evening in EST.
+    expect(clockTime(new Date("2026-07-23T02:00:00Z"), -300)).toBe("21:00:00");
   });
 });
 
 describe("formatCsv — matches the CDT SensorChart contract", () => {
   it("is header-less time,value and parses cleanly for a continuous sensor", () => {
-    const csv = formatCsv("temperature", generateWindow("temperature", params()));
+    const csv = formatCsv("temperature", generateWindow("temperature", params()), 0);
     const rows = parseLikeCdt(csv);
     expect(rows).toHaveLength(20);
     for (const row of rows) {
@@ -46,14 +64,14 @@ describe("formatCsv — matches the CDT SensorChart contract", () => {
   });
 
   it("encodes movement as 0/1 numerics", () => {
-    const csv = formatCsv("movement", generateWindow("movement", params()));
+    const csv = formatCsv("movement", generateWindow("movement", params()), 0);
     for (const row of parseLikeCdt(csv)) {
       expect([0, 1]).toContain(row.value);
     }
   });
 
   it("encodes state as its ordinal index (parseFloat-safe, no NaN)", () => {
-    const csv = formatCsv("state", generateWindow("state", params()));
+    const csv = formatCsv("state", generateWindow("state", params()), 0);
     const n = SENSORS.state.values!.length;
     for (const row of parseLikeCdt(csv)) {
       expect(Number.isNaN(row.value)).toBe(false);
@@ -106,10 +124,15 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
 
     // Datastream annotations.
     expect(typeof ds["@iot.id"]).toBe("number");
-    expect(ds["@iot.selfLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=sta`);
+    expect(ds["@iot.selfLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=sta&tz=UTC`);
     expect(ds.name).toBe(SENSORS.temperature.observedProperty.name);
     expect(ds.resultTime).toBe(ds.phenomenonTime);
-    expect(ds.properties).toEqual({ seed: 2, frequency: SENSORS.temperature.frequency, generator: "sensors-api" });
+    expect(ds.properties).toEqual({
+      seed: 2,
+      frequency: SENSORS.temperature.frequency,
+      generator: "sensors-api",
+      timezone: "UTC",
+    });
 
     // Related entities are expanded inline with matching ids.
     expect(ds.Sensor["@iot.id"]).toBe(ds["@iot.id"]);
@@ -118,7 +141,7 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
     expect(ds.ObservedProperty.definition).toBe(SENSORS.temperature.observedProperty.definition);
 
     // Observations navigation resolves to the real dataArray endpoint.
-    expect(ds["Observations@iot.navigationLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=dataArray`);
+    expect(ds["Observations@iot.navigationLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=dataArray&tz=UTC`);
     expect(ds["Observations@iot.count"]).toBe(points.length);
     expect(ds.Observations[0]["@iot.id"]).toBe(1);
     expect(ds.Observations[points.length - 1]["@iot.id"]).toBe(points.length);
@@ -133,13 +156,62 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
 describe("formatDataArray — compact OGC form", () => {
   it("has components and a matching-length dataArray of [iso, result] rows", () => {
     const points = generateWindow("temperature", params());
-    const da = formatDataArray("temperature", points);
+    const da = formatDataArray("temperature", points, 0);
     expect(da.components).toEqual(["phenomenonTime", "result"]);
     expect(da["dataArray@iot.count"]).toBe(points.length);
     expect(da.dataArray).toHaveLength(points.length);
     for (const [iso, result] of da.dataArray) {
       expect(Number.isNaN(new Date(iso as string).getTime())).toBe(false);
       expect(typeof result).toBe("number");
+    }
+  });
+});
+
+describe("timezone rendering", () => {
+  it("times CSV rows on the zone's local clock", () => {
+    const points = generateWindow("temperature", EDT);
+    const rows = parseLikeCdt(formatCsv("temperature", points, EDT.offsetMinutes));
+    // Last bucket at/just before 14:05Z is 14:05Z -> 10:05 EDT.
+    expect(rows[rows.length - 1].time).toBe("10:05:00");
+  });
+
+  it("stamps STA observations with the zone offset, same instants", () => {
+    const points = generateWindow("temperature", EDT);
+    const ds = formatSta("temperature", EDT, points, ORIGIN);
+    for (const o of ds.Observations) {
+      expect(o.phenomenonTime).toMatch(/-04:00$/);
+      expect(o.resultTime).toBe(o.phenomenonTime);
+    }
+    expect(new Date(ds.Observations[ds.Observations.length - 1].phenomenonTime).getTime()).toBe(
+      points[points.length - 1].at.getTime(),
+    );
+    expect(ds.phenomenonTime).toBe(
+      `${ds.Observations[0].phenomenonTime}/${ds.Observations[ds.Observations.length - 1].phenomenonTime}`,
+    );
+  });
+
+  it("reports the zone in properties and carries it on the links", () => {
+    const ds = formatSta("temperature", EDT, generateWindow("temperature", EDT), ORIGIN);
+    expect(ds.properties.timezone).toBe("EDT");
+    expect(ds["@iot.selfLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=sta&tz=EDT`);
+    expect(ds["Observations@iot.navigationLink"]).toBe(
+      `${ORIGIN}/api/sensor/temperature?format=dataArray&tz=EDT`,
+    );
+  });
+
+  it("percent-encodes an explicit-offset zone in the links", () => {
+    const zone = params({ timezone: "UTC+05:30", offsetMinutes: 330 });
+    const ds = formatSta("temperature", zone, generateWindow("temperature", zone), ORIGIN);
+    expect(ds["@iot.selfLink"]).toBe(
+      `${ORIGIN}/api/sensor/temperature?format=sta&tz=UTC%2B05%3A30`,
+    );
+  });
+
+  it("stamps dataArray rows with the zone offset", () => {
+    const da = formatDataArray("temperature", generateWindow("temperature", EDT), EDT.offsetMinutes);
+    for (const [iso] of da.dataArray) {
+      expect(iso as string).toMatch(/-04:00$/);
+      expect(Number.isNaN(new Date(iso as string).getTime())).toBe(false);
     }
   });
 });

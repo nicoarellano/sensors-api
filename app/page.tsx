@@ -168,7 +168,9 @@ export default function Home() {
           diurnal curve plus gentle seeded noise, so the same URL is reproducible while readings
           still fluctuate. Returns an OGC SensorThings Datastream by default — paste the URL
           straight into a CollabDT sensor (Data format = Json). CSV, dataArray, and reading
-          formats are available via <span className="font-mono">?format=</span>.
+          formats are available via <span className="font-mono">?format=</span>. Time-of-day is read
+          in <span className="font-mono">EDT</span> by default; pass any timezone abbreviation with{" "}
+          <span className="font-mono">?tz=</span> (e.g. <span className="font-mono">?tz=PST</span>).
         </p>
       </header>
 
@@ -249,6 +251,8 @@ export default function Home() {
             "/api/sensor/temperature?window=24h",
             "/api/sensor/flow?seed=7&window=24h&format=csv",
             "/api/sensor/state?format=csv",
+            "/api/sensor/temperature?tz=PDT&window=24h&format=csv",
+            "/api/sensor/temperature?timezone=utc&format=dataArray&points=50",
           ].map((href) => (
             <li key={href}>
               <a className="text-blue-600 dark:text-blue-400 hover:underline break-all" href={href} target="_blank" rel="noreferrer">

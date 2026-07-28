@@ -10,8 +10,13 @@ import type { SensorParams } from "@/lib/types";
 
 const AT = new Date("2026-07-23T14:05:00Z");
 
+/**
+ * Base params for the curve assertions below. They read time-of-day in UTC
+ * (offset 0) so "overnight" and "daytime" filters can use `getUTCHours()`;
+ * timezone behavior is covered separately at the bottom of this file.
+ */
 function params(overrides: Partial<SensorParams> = {}): SensorParams {
-  return { seed: 0, at: AT, format: "csv", ...overrides };
+  return { seed: 0, at: AT, format: "csv", timezone: "UTC", offsetMinutes: 0, ...overrides };
 }
 
 describe("generateReading — determinism", () => {
@@ -251,6 +256,80 @@ describe("seed separation — different seeds read as different sensors", () => 
         expect(p.value as number).toBeLessThan(SENSORS.light.max * 0.02);
       }
     }
+  });
+});
+
+describe("timezone — the diurnal curve follows local time-of-day", () => {
+  /** Hour-of-day in the given zone for a point's instant. */
+  function localHour(at: Date, offsetMinutes: number): number {
+    return new Date(at.getTime() + offsetMinutes * 60000).getUTCHours();
+  }
+
+  it("keeps a quiet-floored sensor dark overnight in the requested zone", () => {
+    // Local 22:00–04:00 in EDT is 02:00–08:00 UTC, i.e. broad daylight in UTC
+    // terms — the curve must follow the zone, not the wall clock of the server.
+    const w = generateWindow(
+      "light",
+      params({
+        seed: 3,
+        timezone: "EDT",
+        offsetMinutes: -240,
+        at: new Date("2026-07-27T23:59:00Z"),
+        windowMs: 24 * 3600 * 1000,
+      }),
+    );
+    const night = w.filter((p) => {
+      const h = localHour(p.at, -240);
+      return h >= 22 || h < 4;
+    });
+    expect(night.length).toBeGreaterThan(0);
+    for (const p of night) {
+      expect(p.value as number).toBeLessThan(SENSORS.light.max * 0.02);
+    }
+  });
+
+  it("puts the daylight peak at local, not UTC, midday", () => {
+    const at = new Date("2026-07-27T23:59:00Z");
+    const window = { at, windowMs: 24 * 3600 * 1000, seed: 4 };
+    const brightestLocalHour = (timezone: string, offsetMinutes: number) => {
+      const w = generateWindow(
+        "irradiance",
+        params({ ...window, timezone, offsetMinutes }),
+      );
+      const peak = w.reduce((a, b) => ((b.value as number) > (a.value as number) ? b : a));
+      return localHour(peak.at, offsetMinutes);
+    };
+    // The shape peaks at 12h local, so the peak sits near local noon in
+    // whichever zone was asked for.
+    expect(brightestLocalHour("UTC", 0)).toBeGreaterThanOrEqual(10);
+    expect(brightestLocalHour("UTC", 0)).toBeLessThanOrEqual(14);
+    expect(brightestLocalHour("EDT", -240)).toBeGreaterThanOrEqual(10);
+    expect(brightestLocalHour("EDT", -240)).toBeLessThanOrEqual(14);
+    expect(brightestLocalHour("JST", 540)).toBeGreaterThanOrEqual(10);
+    expect(brightestLocalHour("JST", 540)).toBeLessThanOrEqual(14);
+  });
+
+  it("shifts the series when the zone changes, and stays deterministic per zone", () => {
+    const utc = generateReading("temperature", params({ seed: 2 })).value;
+    const edt = generateReading(
+      "temperature",
+      params({ seed: 2, timezone: "EDT", offsetMinutes: -240 }),
+    ).value;
+    expect(edt).not.toBe(utc);
+    expect(
+      generateReading("temperature", params({ seed: 2, timezone: "EDT", offsetMinutes: -240 }))
+        .value,
+    ).toBe(edt);
+  });
+
+  it("reports the zone and an offset-carrying timestamp on a reading", () => {
+    const r = generateReading(
+      "temperature",
+      params({ timezone: "EDT", offsetMinutes: -240 }),
+    );
+    expect(r.timezone).toBe("EDT");
+    expect(r.timestamp).toBe("2026-07-23T10:05:00.000-04:00");
+    expect(new Date(r.timestamp).getTime()).toBe(AT.getTime());
   });
 });
 

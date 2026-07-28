@@ -1,6 +1,8 @@
 // Renderers turning a generated window into the wire formats we serve:
 //   - CSV: header-less `time,value` (clock-style time) for the CollabDT
 //     SensorChart (which fetches a Data URL and parses CSV).
+// Times are rendered in the requested timezone (see lib/timezones.ts): CSV as a
+// local `H:MM:SS` clock, STA/dataArray as ISO 8601 carrying the zone's offset.
 //   - STA: an OGC SensorThings Datastream with embedded Observations.
 //   - dataArray: the compact OGC `{components, dataArray}` time-series form.
 
@@ -15,6 +17,7 @@ import type {
   UnitOfMeasurement,
   WindowPoint,
 } from "@/lib/types";
+import { isoWithOffset } from "@/lib/timezones";
 
 /** OGC-typed observation result: number (measurement), boolean (truth), string (category). */
 export type StaResult = number | boolean | string;
@@ -74,7 +77,13 @@ export interface StaDatastream {
   unitOfMeasurement: UnitOfMeasurement;
   phenomenonTime: string;
   resultTime: string;
-  properties: { seed: number; frequency: number; generator: string };
+  properties: {
+    seed: number;
+    frequency: number;
+    generator: string;
+    /** Zone the observation timestamps and the diurnal curve are expressed in. */
+    timezone: string;
+  };
   "Sensor@iot.navigationLink": string;
   Sensor: StaSensor;
   "ObservedProperty@iot.navigationLink": string;
@@ -94,9 +103,14 @@ function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
 }
 
-/** Clock-style UTC time `H:MM:SS` (single-digit hour), matching the reference CSVs. */
-export function clockTime(at: Date): string {
-  return `${at.getUTCHours()}:${pad2(at.getUTCMinutes())}:${pad2(at.getUTCSeconds())}`;
+/**
+ * Clock-style local time `H:MM:SS` (single-digit hour), matching the reference
+ * CSVs. `offsetMinutes` is the requested zone's fixed offset from UTC; 0 gives
+ * UTC clock time.
+ */
+export function clockTime(at: Date, offsetMinutes: number): string {
+  const local = new Date(at.getTime() + offsetMinutes * 60000);
+  return `${local.getUTCHours()}:${pad2(local.getUTCMinutes())}:${pad2(local.getUTCSeconds())}`;
 }
 
 /** CSV-safe numeric encoding: enum -> ordinal index, binary -> 0/1, continuous -> value. */
@@ -116,10 +130,14 @@ function staResult(type: SensorType, value: number | string): StaResult {
   return value as number;
 }
 
-/** Header-less `time,value` CSV; one point per line. */
-export function formatCsv(type: SensorType, points: WindowPoint[]): string {
+/** Header-less `time,value` CSV; one point per line, timed in the given zone. */
+export function formatCsv(
+  type: SensorType,
+  points: WindowPoint[],
+  offsetMinutes: number,
+): string {
   return points
-    .map((p) => `${clockTime(p.at)},${csvValue(type, p.value)}`)
+    .map((p) => `${clockTime(p.at, offsetMinutes)},${csvValue(type, p.value)}`)
     .join("\n");
 }
 
@@ -137,10 +155,12 @@ export function formatSta(
   const cfg = SENSORS[type];
   const id = sensorIotId(type);
   const base = `${origin}/api/sensor/${type}`;
-  const selfLink = `${base}?format=sta`;
+  // Links carry the zone so following one reproduces this series.
+  const tz = `&tz=${encodeURIComponent(params.timezone)}`;
+  const selfLink = `${base}?format=sta${tz}`;
 
   const observations: StaObservation[] = points.map((p, i) => {
-    const iso = p.at.toISOString();
+    const iso = isoWithOffset(p.at, params.offsetMinutes);
     return {
       "@iot.id": i + 1,
       phenomenonTime: iso,
@@ -148,8 +168,10 @@ export function formatSta(
       result: staResult(type, p.value),
     };
   });
-  const first = points[0]?.at.toISOString();
-  const last = points[points.length - 1]?.at.toISOString();
+  const first = points[0] && isoWithOffset(points[0].at, params.offsetMinutes);
+  const last =
+    points[points.length - 1] &&
+    isoWithOffset(points[points.length - 1].at, params.offsetMinutes);
   const interval = first && last ? `${first}/${last}` : "";
 
   return {
@@ -161,7 +183,12 @@ export function formatSta(
     unitOfMeasurement: cfg.unitOfMeasurement,
     phenomenonTime: interval,
     resultTime: interval,
-    properties: { seed: params.seed, frequency: cfg.frequency, generator: "sensors-api" },
+    properties: {
+      seed: params.seed,
+      frequency: cfg.frequency,
+      generator: "sensors-api",
+      timezone: params.timezone,
+    },
     "Sensor@iot.navigationLink": selfLink,
     Sensor: {
       "@iot.id": id,
@@ -177,7 +204,7 @@ export function formatSta(
       definition: cfg.observedProperty.definition,
       description: cfg.observedProperty.name,
     },
-    "Observations@iot.navigationLink": `${base}?format=dataArray`,
+    "Observations@iot.navigationLink": `${base}?format=dataArray${tz}`,
     "Observations@iot.count": observations.length,
     Observations: observations,
   };
@@ -187,9 +214,10 @@ export function formatSta(
 export function formatDataArray(
   type: SensorType,
   points: WindowPoint[],
+  offsetMinutes: number,
 ): DataArray {
   const dataArray: [string, StaResult][] = points.map((p) => [
-    p.at.toISOString(),
+    isoWithOffset(p.at, offsetMinutes),
     staResult(type, p.value),
   ]);
   return {

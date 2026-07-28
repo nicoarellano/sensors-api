@@ -3,6 +3,7 @@
 
 import { NextResponse } from "next/server";
 import { SENSORS, SENSOR_TYPES, observationTypeFor } from "@/lib/config";
+import { DEFAULT_TIMEZONE, TIMEZONE_ABBREVIATIONS } from "@/lib/timezones";
 import type { SensorConfig } from "@/lib/types";
 
 export const dynamic = "force-static";
@@ -30,7 +31,14 @@ export async function GET() {
   });
 
   return NextResponse.json(
-    { count: sensors.length, sensors },
+    {
+      count: sensors.length,
+      // Zone the series are timed in unless `?tz=` (or `?timezone=`) says
+      // otherwise. Explicit offsets like `UTC-05:00` are accepted too.
+      defaultTimezone: DEFAULT_TIMEZONE,
+      timezones: TIMEZONE_ABBREVIATIONS,
+      sensors,
+    },
     { headers: { "Cache-Control": "public, max-age=60" } },
   );
 }

@@ -6,6 +6,8 @@
 //   ?format=dataArray  compact OGC {components, dataArray}
 //   ?format=reading    a single latest reading
 //   ?points=N | ?window=24h   window sizing (see lib/params.ts)
+//   ?tz=EDT            (default) timezone abbreviation the series is timed in
+//                      (`?timezone=` also accepted; see lib/timezones.ts)
 
 import { NextResponse, type NextRequest } from "next/server";
 import { SENSOR_TYPES, isSensorType } from "@/lib/config";
@@ -45,7 +47,7 @@ export async function GET(
   const points = generateWindow(type, p);
 
   if (p.format === "csv") {
-    return new NextResponse(formatCsv(type, points), {
+    return new NextResponse(formatCsv(type, points, p.offsetMinutes), {
       headers: { ...NO_STORE, "Content-Type": "text/csv; charset=utf-8" },
     });
   }
@@ -57,5 +59,7 @@ export async function GET(
   }
 
   // dataArray
-  return NextResponse.json(formatDataArray(type, points), { headers: NO_STORE });
+  return NextResponse.json(formatDataArray(type, points, p.offsetMinutes), {
+    headers: NO_STORE,
+  });
 }

@@ -42,7 +42,7 @@ natural frequency, ending at "now".
 | `format`    | Content-Type | Body |
 |-------------|--------------|------|
 | `sta` *(default)* | `application/json` | An OGC SensorThings **Datastream** object with `unitOfMeasurement`, `observationType`, `ObservedProperty`, a `phenomenonTime` interval, and embedded `Observations[]`. |
-| `csv`       | `text/csv; charset=utf-8` | Header-less `time,value` rows, one point per line. Clock-style UTC `H:MM:SS` time. This is what CollabDT's `SensorChart` fetches and parses. |
+| `csv`       | `text/csv; charset=utf-8` | Header-less `time,value` rows, one point per line. Clock-style local `H:MM:SS` time (see `tz`). This is what CollabDT's `SensorChart` fetches and parses. |
 | `dataArray` | `application/json` | The compact OGC `{ components, dataArray }` time-series form: rows of `[phenomenonTime, result]`. |
 | `reading`   | `application/json` | A single latest reading (the legacy single-value shape) evaluated at `at`. |
 
@@ -57,7 +57,22 @@ natural frequency, ending at "now".
 | `seed`   | integer         | `0`     | Seeds a deterministic PRNG. Different seeds → different reproducible series. |
 | `min`    | number          | type default | Override the lower bound. May be supplied alone. |
 | `max`    | number          | type default | Override the upper bound. May be supplied alone. |
-| `at`     | ISO 8601 string | now     | End the window (or evaluate `reading`) at a specific instant instead of "now". |
+| `at`     | ISO 8601 string | now     | End the window (or evaluate `reading`) at a specific instant instead of "now". A value with no zone designator is read in `tz`. |
+| `tz`     | timezone abbr   | `EDT`   | Timezone the series is timed in. Case-insensitive; `timezone=` is accepted as an alias. Explicit offsets (`UTC-05:00`, `-0500`) also work. Invalid → 400. |
+
+**Timezone.** `tz` sets the zone that time-of-day is read in, so the diurnal
+curve peaks at **local** noon and not UTC noon: `?tz=PDT` gives a series that
+looks like a sensor on the west coast. It also sets how times are rendered — CSV
+`H:MM:SS` becomes a local clock, and STA/`dataArray`/`reading` timestamps carry
+the zone offset (`2026-07-23T10:05:00.000-04:00`) instead of `Z`. The instants
+themselves are unchanged, so `new Date(...)` round-trips exactly.
+
+Abbreviations are **fixed offsets**, not IANA zones: an abbreviation already
+names one side of the DST fence, so pick the one for the season you are demoing
+(`EST` in winter, `EDT` in summer). No transition rules are applied, which keeps
+a URL reproducible. `CST`/`CDT` are read as US Central; ambiguous ones like `IST`
+are not accepted — use an explicit offset (`?tz=UTC%2B05:30`) instead. The full
+accepted list is in `GET /api/sensors` (`timezones`, `defaultTimezone`).
 
 **Windowing precedence.** `window` and `points` are mutually exclusive; if both
 are present, `window` wins. Every window ends at `at` (default now), anchored to
@@ -77,7 +92,7 @@ so `parseFloat` charts a step line; STA/dataArray keep the string label.
 
 - Unknown/invalid `{type}` → **404** with `{ error, validTypes: [...] }`.
 - Malformed params (non-numeric `seed`/`min`/`max`, `min > max`, unparseable
-  `at`, bad `format`/`points`/`window`) → **400** with `{ error }`.
+  `at`, bad `format`/`points`/`window`/`tz`) → **400** with `{ error }`.
 
 #### STA response (default)
 
@@ -88,7 +103,7 @@ Full field reference in [`docs/ogc-sensorthings-integration.md`](docs/ogc-sensor
 ```json
 {
   "@iot.id": 1,
-  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta",
+  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
   "name": "Air Temperature",
   "description": "Synthetic Air Temperature datastream for temperature.",
   "observationType": "http://www.opengis.net/def/observationType/OGC-OM/2.0/OM_Measurement",
@@ -97,9 +112,9 @@ Full field reference in [`docs/ogc-sensorthings-integration.md`](docs/ogc-sensor
     "symbol": "°C",
     "definition": "https://qudt.org/vocab/unit/DEG_C"
   },
-  "phenomenonTime": "2026-07-22T14:30:00.000Z/2026-07-23T14:30:00.000Z",
-  "resultTime": "2026-07-22T14:30:00.000Z/2026-07-23T14:30:00.000Z",
-  "properties": { "seed": 0, "frequency": 300000, "generator": "sensors-api" },
+  "phenomenonTime": "2026-07-22T10:30:00.000-04:00/2026-07-23T10:30:00.000-04:00",
+  "resultTime": "2026-07-22T10:30:00.000-04:00/2026-07-23T10:30:00.000-04:00",
+  "properties": { "seed": 0, "frequency": 300000, "generator": "sensors-api", "timezone": "EDT" },
   "Sensor": {
     "@iot.id": 1,
     "name": "Synthetic temperature sensor",
@@ -113,13 +128,13 @@ Full field reference in [`docs/ogc-sensorthings-integration.md`](docs/ogc-sensor
     "definition": "https://dbpedia.org/page/Temperature",
     "description": "Air Temperature"
   },
-  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray",
+  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray&tz=EDT",
   "Observations@iot.count": 288,
   "Observations": [
     {
       "@iot.id": 1,
-      "phenomenonTime": "2026-07-22T14:30:00.000Z",
-      "resultTime": "2026-07-22T14:30:00.000Z",
+      "phenomenonTime": "2026-07-22T10:30:00.000-04:00",
+      "resultTime": "2026-07-22T10:30:00.000-04:00",
       "result": 23.71
     }
   ]
@@ -138,8 +153,8 @@ intentionally omitted — deployment geography is owned by the consuming app.
   "components": ["phenomenonTime", "result"],
   "dataArray@iot.count": 50,
   "dataArray": [
-    ["2026-07-23T13:41:00.000Z", 23.71],
-    ["2026-07-23T13:46:00.000Z", 23.68]
+    ["2026-07-23T09:41:00.000-04:00", 23.71],
+    ["2026-07-23T09:46:00.000-04:00", 23.68]
   ]
 }
 ```
@@ -152,14 +167,16 @@ intentionally omitted — deployment geography is owned by the consuming app.
 14:40:00,23.74
 ```
 
-No header row. `time` is clock-style UTC `H:MM:SS`; `value` is `parseFloat`-able
-for every sensor kind. This is the format CollabDT's `SensorChart` consumes.
+No header row. `time` is a clock-style `H:MM:SS` local to `tz` (EDT by default);
+`value` is `parseFloat`-able for every sensor kind. This is the format CollabDT's
+`SensorChart` consumes.
 
 ### `GET /api/sensors`
 
 Manifest listing every sensor type with its default `unit`, `kind`, `min`,
 `max`, `frequency`, OGC `unitOfMeasurement`/`observationType`/`observedProperty`,
-`values` (enum sensors), and ready-to-paste `staUrl` (default) + `csvUrl`.
+`values` (enum sensors), and ready-to-paste `staUrl` (default) + `csvUrl`. Also
+carries `defaultTimezone` and the `timezones` abbreviations `?tz=` accepts.
 
 ## Sensor types
 
@@ -240,8 +257,10 @@ Each value is produced by a small `mulberry32` PRNG seeded from a mix of
 
 Because the seed derives from the timestamp, **the same
 type + seed + timestamp + params always yields the same value**, while a
-different seed produces a different but equally reproducible series. Time is
-evaluated in **UTC** so results are identical regardless of server timezone.
+different seed produces a different but equally reproducible series. Time-of-day
+is evaluated at the **fixed offset of `tz`** (EDT by default) rather than in the
+server's zone, so results depend only on the URL. Changing `tz` shifts the curve
+(that is the point) but each zone stays reproducible.
 
 ## Example URLs
 
@@ -263,6 +282,12 @@ evaluated in **UTC** so results are identical regardless of server timezone.
 # Seeding, range, fixed instant
 /api/sensor/temperature?seed=2&min=-20&max=50        # stretched across -20..50
 /api/sensor/temperature?at=2026-07-23T14:05:00Z      # window ending at a fixed instant
+
+# Timezone (default EDT, case-insensitive, `timezone=` also works)
+/api/sensor/temperature?tz=PDT&format=csv            # local clock + curve on Pacific time
+/api/sensor/temperature?timezone=utc                 # UTC: ISO timestamps keep the Z spelling
+/api/sensor/temperature?tz=UTC%2B05:30               # explicit offset for ambiguous zones
+/api/sensor/temperature?tz=JST&at=2026-07-23T09:00:00 # `at` read as 09:00 local (JST)
 
 # Discrete sensors
 /api/sensor/state                                    # STA: result is a string label
@@ -322,6 +347,7 @@ lib/
   prng.ts                    # mulberry32 + seed helpers
   generator.ts               # curve + layered noise + windowing
   params.ts                  # query-param parsing/validation
+  timezones.ts               # `?tz=` abbreviations -> fixed UTC offsets
   format.ts                  # CSV / STA / dataArray renderers
 public/sensor-examples/      # reference CSVs (curve shape only, not read at runtime)
 ```

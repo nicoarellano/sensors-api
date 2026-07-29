@@ -1,7 +1,13 @@
-// Value generation: a per-seed sensor personality applied to the diurnal curve,
-// plus multi-scale seeded noise and sparse events, clamped and scaled into the
-// effective range. Pure and deterministic — the same
+// Value generation: a physical rule evaluated against the site and the instant,
+// reshaped by a per-seed sensor personality, then layered with multi-scale
+// seeded noise and sparse events. Pure and deterministic — the same
 // (type, seed, timestamp, params) always yields the same value.
+//
+// The rule (see lib/realism.ts) returns a value in the sensor's own unit for the
+// requested location and placement: an outdoor thermometer at 45 N reads -13 °C
+// in January. That value is normalized through the rule's own range, so a
+// caller's `min`/`max` still *stretch* the series into their band instead of
+// clipping it.
 //
 // Three things make two seeds look like two genuinely different sensors rather
 // than the same line drawn twice:
@@ -13,18 +19,21 @@
 //   - events:  sparse Gaussian bursts for sensors where spikes are physical
 //     (a machine starting, a tap opening), configured via `eventRate`.
 //
-// Common-sense behavior is preserved: the personality scales the *swing above
-// the daily floor*, so a sensor that is dark/closed/idle overnight stays that
-// way for every seed, while daytime values spread out visibly.
+// Common-sense behavior is preserved: a sensor that is dark/closed/idle
+// overnight stays that way for every seed, while daytime values spread out
+// visibly.
 
 import { SENSORS, type SensorType } from "@/lib/config";
 import { mulberry32, hashString, mixSeed } from "@/lib/prng";
+import { shapeContext } from "@/lib/realism";
 import { isoWithOffset } from "@/lib/timezones";
 import type {
+  Range,
   Reading,
   SensorConfig,
   SensorParams,
   SensorProfile,
+  ShapeContext,
   WindowPoint,
 } from "@/lib/types";
 
@@ -65,10 +74,6 @@ const PHASE_HOURS = 1.5; // peak timing shift: -1.5 .. +1.5 h
 const NOISE_MIN = 0.6; // noise multiplier: 0.6 .. 1.8
 const NOISE_SPAN = 1.2;
 
-/** A shape is "quiet-floored" if it sits at zero for this much of the day. */
-const QUIET_DAY_FRACTION = 0.15;
-const QUIET_EPSILON = 0.02;
-
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
@@ -90,22 +95,6 @@ function saturate(x: number, softLow: boolean): number {
     y = softLow ? KNEE * Math.exp((y - KNEE) / KNEE) : Math.max(y, 0);
   }
   return clamp(y, 0, 1);
-}
-
-/**
- * Hour-of-day in [0, 24) as a float, read in the requested zone's fixed offset
- * (see lib/timezones.ts) rather than the server's zone, so the result depends
- * only on the URL. `offsetMinutes` 0 gives UTC hour-of-day.
- */
-function hourOfDay(at: Date, offsetMinutes: number): number {
-  const local = at.getTime() + offsetMinutes * 60000;
-  const intoDay = ((local % DAY_MS) + DAY_MS) % DAY_MS;
-  return Math.floor(intoDay / 1000) / 3600;
-}
-
-/** Wrap an hour offset back into [0, 24). */
-function wrapHour(h: number): number {
-  return ((h % 24) + 24) % 24;
 }
 
 /** Cosine-interpolated seeded control points along an index axis, in [-1, 1]. */
@@ -137,41 +126,6 @@ function layeredNoise(seed: number, type: SensorType, at: Date): number {
     sum += oct.weight * interp(seed, typeHash, oct.salt, t / oct.periodMs);
   }
   return clamp(sum, -1, 1);
-}
-
-/** Per-shape daily statistics, computed once per sensor type. */
-interface ShapeStats {
-  /** Lowest normalized value the shape reaches over a day. */
-  floor: number;
-  /** True when the shape rests at ~zero for a meaningful part of the day. */
-  quiet: boolean;
-}
-
-const shapeStatsCache = new Map<SensorType, ShapeStats>();
-
-/** Sample the shape across a day to learn its floor and whether it goes quiet. */
-function shapeStats(type: SensorType): ShapeStats {
-  const cached = shapeStatsCache.get(type);
-  if (cached) return cached;
-
-  const shape = configOf(type).shape;
-  let floor = 0;
-  let quiet = false;
-  if (shape) {
-    const steps = 288; // every 5 minutes
-    let min = Infinity;
-    let quietSteps = 0;
-    for (let i = 0; i < steps; i++) {
-      const v = shape((i * 24) / steps);
-      if (v < min) min = v;
-      if (v <= QUIET_EPSILON) quietSteps++;
-    }
-    floor = min;
-    quiet = quietSteps / steps >= QUIET_DAY_FRACTION;
-  }
-  const stats: ShapeStats = { floor, quiet };
-  shapeStatsCache.set(type, stats);
-  return stats;
 }
 
 const profileCache = new Map<string, SensorProfile>();
@@ -236,16 +190,47 @@ function eventBoost(
   return boost;
 }
 
-/** Resolve the effective [min, max] range from params, falling back to defaults. */
+/**
+ * The range the sensor's rule reports for this context — the band the physical
+ * value is normalized against. Falls back to the entry's nominal band for rules
+ * that declare none.
+ */
+function ruleRange(type: SensorType, ctx: ShapeContext): Range {
+  const cfg = configOf(type);
+  return cfg.rule.range ? cfg.rule.range(ctx) : { min: cfg.min, max: cfg.max };
+}
+
+/**
+ * The range the value is finally scaled into: the rule's range, with either end
+ * replaced by a caller's `min`/`max`. Because normalization uses the rule's own
+ * range, a user band *stretches* the series into it rather than clipping it.
+ */
 function effectiveRange(
+  params: SensorParams,
+  natural: Range,
+): Range {
+  return {
+    min: params.min ?? natural.min,
+    max: params.max ?? natural.max,
+  };
+}
+
+/**
+ * The context a sensor's shape is read at. Peak timing is part of the per-seed
+ * personality, so the rule is evaluated at a slightly shifted instant — except
+ * for solar-locked sensors, where the timing is astronomy and moving it would be
+ * an error rather than a personality. Noise and events stay keyed to the real
+ * instant.
+ */
+function shapeContextFor(
   type: SensorType,
   params: SensorParams,
-): { min: number; max: number } {
-  const cfg = SENSORS[type];
-  return {
-    min: params.min ?? cfg.min,
-    max: params.max ?? cfg.max,
-  };
+  at: Date,
+): ShapeContext {
+  const cfg = configOf(type);
+  if (cfg.rule.solarLocked) return shapeContext(params, at);
+  const profile = sensorProfile(type, params.seed);
+  return shapeContext(params, new Date(at.getTime() - profile.phaseHours * HOUR_MS));
 }
 
 /** Deterministic PRNG for a discrete draw at a sample instant. */
@@ -262,16 +247,18 @@ export function computeValue(
   at: Date,
 ): number | string {
   const cfg = SENSORS[type];
-  const hour = hourOfDay(at, params.offsetMinutes);
+  const ctx = shapeContextFor(type, params, at);
 
   if (cfg.kind === "binary") {
-    const p = cfg.prob ? cfg.prob(hour) : 0;
+    const p = cfg.rule.prob ? cfg.rule.prob(ctx) : 0;
     return bucketRng(params.seed, type, at)() < p ? 1 : 0;
   }
 
   if (cfg.kind === "enum") {
     const values = cfg.values ?? [];
-    const weights = cfg.weights ? cfg.weights(hour) : values.map(() => 1);
+    const weights = cfg.rule.weights
+      ? cfg.rule.weights(ctx)
+      : values.map(() => 1);
     const total = weights.reduce((sum, w) => sum + w, 0);
     let r = bucketRng(params.seed, type, at)() * total;
     for (let i = 0; i < values.length; i++) {
@@ -282,23 +269,30 @@ export function computeValue(
   }
 
   // continuous
-  const { min, max } = effectiveRange(type, params);
+  const natural = ruleRange(type, ctx);
+  const { min, max } = effectiveRange(params, natural);
   const profile = sensorProfile(type, params.seed);
-  const { floor, quiet } = shapeStats(type);
 
-  // Shifted diurnal baseline: each seed peaks a little earlier or later.
-  const base = cfg.shape ? cfg.shape(wrapHour(hour - profile.phaseHours)) : 0.5;
+  // Position of the physical value within the range the rule reports for this
+  // context — the sensor's own reading of the site, before personality.
+  const span = natural.max - natural.min || 1;
+  const physical = cfg.rule.value ? cfg.rule.value(ctx) : (natural.min + natural.max) / 2;
+  const base = clamp((physical - natural.min) / span, 0, 1);
 
-  // Scale the swing above the daily floor, not the floor itself, so overnight
-  // behavior stays physical while daytime amplitudes spread out.
-  const swing = profile.gain * (base - floor);
+  // A rule whose range bottoms out at zero is one that genuinely rests at zero
+  // (dark, closed, off), so it must be allowed to sit exactly there.
+  const quiet = natural.min === 0;
+
+  // Personality: each seed swings harder or softer than the next.
+  const swing = profile.gain * base;
   // Baseline shift fades out near the floor (and is skipped entirely for
   // sensors that go genuinely dark/closed at night).
   const levelTerm = quiet ? 0 : profile.level * (0.25 + 0.75 * base);
 
-  // Noise tracks activity: loudest at the peak, near-silent when the sensor is
-  // physically off.
-  const activity = quiet ? 0.1 + 0.9 * base : 0.55 + 0.45 * base;
+  // Noise tracks activity: loudest at the peak, and for a sensor that rests at
+  // zero it scales with the signal itself, so a dark night reads dark instead of
+  // picking up a few hundred lux of noise out of a 100,000 lux range.
+  const activity = quiet ? base : 0.55 + 0.45 * base;
   const noiseUnit = cfg.noise * profile.noiseScale * activity;
   const noise = noiseUnit * layeredNoise(params.seed, type, at);
   const events = eventBoost(
@@ -309,10 +303,16 @@ export function computeValue(
     params.offsetMinutes,
   );
 
-  const normalized = saturate(floor + swing + levelTerm + noise + events, !quiet);
+  const normalized = saturate(swing + levelTerm + noise + events, !quiet);
   const value = min + normalized * (max - min);
   const rounded = Math.round(value * 100) / 100;
   return clamp(rounded, min, max);
+}
+
+/** The effective [min, max] a continuous sensor reports for a request. */
+export function readingRange(type: SensorType, params: SensorParams): Range {
+  const ctx = shapeContextFor(type, params, params.at);
+  return effectiveRange(params, ruleRange(type, ctx));
 }
 
 /** Generate a single reading at `params.at`. */
@@ -325,10 +325,12 @@ export function generateReading(type: SensorType, params: SensorParams): Reading
     seed: params.seed,
     timestamp: isoWithOffset(params.at, params.offsetMinutes),
     timezone: params.timezone,
+    location: { latitude: params.latitude, longitude: params.longitude },
+    placement: params.placement,
     value,
   };
   if (cfg.kind === "continuous") {
-    const { min, max } = effectiveRange(type, params);
+    const { min, max } = readingRange(type, params);
     reading.min = min;
     reading.max = max;
   }

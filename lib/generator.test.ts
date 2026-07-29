@@ -2,10 +2,12 @@ import { describe, it, expect } from "vitest";
 import {
   generateReading,
   generateWindow,
+  readingRange,
   sensorProfile,
   MAX_POINTS,
 } from "@/lib/generator";
 import { SENSORS } from "@/lib/config";
+import { meridianLongitude } from "@/lib/timezones";
 import type { SensorParams } from "@/lib/types";
 
 const AT = new Date("2026-07-23T14:05:00Z");
@@ -13,10 +15,21 @@ const AT = new Date("2026-07-23T14:05:00Z");
 /**
  * Base params for the curve assertions below. They read time-of-day in UTC
  * (offset 0) so "overnight" and "daytime" filters can use `getUTCHours()`;
- * timezone behavior is covered separately at the bottom of this file.
+ * timezone behavior is covered separately at the bottom of this file. The site
+ * and placement match the API defaults: the reference site, exposed to the sky.
  */
 function params(overrides: Partial<SensorParams> = {}): SensorParams {
-  return { seed: 0, at: AT, format: "csv", timezone: "UTC", offsetMinutes: 0, ...overrides };
+  return {
+    seed: 0,
+    at: AT,
+    format: "csv",
+    timezone: "UTC",
+    offsetMinutes: 0,
+    latitude: 45,
+    longitude: -75,
+    placement: "outdoor",
+    ...overrides,
+  };
 }
 
 describe("generateReading — determinism", () => {
@@ -35,7 +48,8 @@ describe("generateReading — determinism", () => {
 
 describe("generateReading — gentle per-reading fluctuation", () => {
   it("consecutive-second readings change, but only slightly", () => {
-    const range = SENSORS.temperature.max - SENSORS.temperature.min;
+    const band = readingRange("temperature", params({ seed: 5 }));
+    const range = band.max - band.min;
     const values: number[] = [];
     for (let s = 0; s < 12; s++) {
       const at = new Date(AT.getTime() + s * 1000);
@@ -67,10 +81,17 @@ describe("generateReading — clamping and range", () => {
         const at = new Date(Date.UTC(2026, 6, 23, 0, m, 0));
         const r = generateReading("temperature", params({ seed, at }));
         expect(typeof r.value).toBe("number");
-        expect(r.value as number).toBeGreaterThanOrEqual(SENSORS.temperature.min);
-        expect(r.value as number).toBeLessThanOrEqual(SENSORS.temperature.max);
+        expect(r.value as number).toBeGreaterThanOrEqual(r.min as number);
+        expect(r.value as number).toBeLessThanOrEqual(r.max as number);
       }
     }
+  });
+
+  it("reports a range that follows the season rather than a fixed band", () => {
+    const july = generateReading("temperature", params({ at: new Date("2026-07-23T12:00:00Z") }));
+    const january = generateReading("temperature", params({ at: new Date("2026-01-15T12:00:00Z") }));
+    expect(january.min as number).toBeLessThan(0);
+    expect(july.min as number).toBeGreaterThan(january.max as number);
   });
 
   it("respects user min/max and stretches the curve into the new band (not clipping)", () => {
@@ -94,13 +115,14 @@ describe("generateReading — clamping and range", () => {
     expect(one.max).toBe(50);
   });
 
-  it("supports one-sided overrides", () => {
+  it("supports one-sided overrides, keeping the rule's end on the other side", () => {
+    const natural = readingRange("temperature", params());
     const hi = generateReading("temperature", params({ max: 20 }));
-    expect(hi.min).toBe(SENSORS.temperature.min);
+    expect(hi.min).toBe(natural.min);
     expect(hi.max).toBe(20);
     const lo = generateReading("temperature", params({ min: 25 }));
     expect(lo.min).toBe(25);
-    expect(lo.max).toBe(SENSORS.temperature.max);
+    expect(lo.max).toBe(natural.max);
   });
 });
 
@@ -198,11 +220,33 @@ describe("sensorProfile — per-seed personality", () => {
 });
 
 /** Day-long window of values for a seed, ending at midnight UTC. */
-function daySeries(type: Parameters<typeof generateWindow>[0], seed: number) {
+function daySeries(
+  type: Parameters<typeof generateWindow>[0],
+  seed: number,
+  overrides: Partial<SensorParams> = {},
+) {
   return generateWindow(
     type,
-    params({ seed, at: new Date("2026-07-27T23:59:00Z"), windowMs: 24 * 3600 * 1000 }),
+    params({
+      seed,
+      at: new Date("2026-07-27T23:59:00Z"),
+      windowMs: 24 * 3600 * 1000,
+      ...overrides,
+    }),
   );
+}
+
+/** Mean of the points whose local hour falls in [from, to). */
+function meanBetween(
+  points: { at: Date; value: number | string }[],
+  from: number,
+  to: number,
+) {
+  const inRange = points.filter((p) => {
+    const h = p.at.getUTCHours();
+    return from <= to ? h >= from && h < to : h >= from || h < to;
+  });
+  return mean(inRange.map((p) => p.value as number));
 }
 
 function mean(values: number[]): number {
@@ -211,14 +255,11 @@ function mean(values: number[]): number {
 
 describe("seed separation — different seeds read as different sensors", () => {
   const SEEDS = [1, 2, 3, 4, 5];
+  const INDOOR: Partial<SensorParams> = { placement: "indoor" };
 
   it("spreads daytime energy levels well apart", () => {
     const daytimeMeans = SEEDS.map((seed) =>
-      mean(
-        daySeries("energy_consumption", seed)
-          .filter((p) => p.at.getUTCHours() >= 8 && p.at.getUTCHours() < 20)
-          .map((p) => p.value as number),
-      ),
+      meanBetween(daySeries("energy_consumption", seed, INDOOR), 8, 20),
     );
     // The loudest seed draws at least 40% more than the quietest.
     expect(Math.max(...daytimeMeans) / Math.min(...daytimeMeans)).toBeGreaterThan(1.4);
@@ -226,29 +267,27 @@ describe("seed separation — different seeds read as different sensors", () => 
 
   it("does not pin peaks flat against the ceiling", () => {
     for (const seed of SEEDS) {
-      const values = daySeries("energy_consumption", seed).map((p) => p.value as number);
-      const atCeiling = values.filter((v) => v >= SENSORS.energy_consumption.max);
-      expect(atCeiling).toHaveLength(0);
+      const p = params({ seed, ...INDOOR });
+      const ceiling = readingRange("energy_consumption", p).max;
+      const values = daySeries("energy_consumption", seed, INDOOR).map(
+        (point) => point.value as number,
+      );
+      expect(values.filter((v) => v >= ceiling)).toHaveLength(0);
     }
   });
 
   it("keeps overnight behavior physical for every seed", () => {
     for (const seed of SEEDS) {
-      const night = daySeries("energy_consumption", seed).filter(
-        (p) => p.at.getUTCHours() >= 1 && p.at.getUTCHours() < 4,
-      );
-      const day = daySeries("energy_consumption", seed).filter(
-        (p) => p.at.getUTCHours() >= 8 && p.at.getUTCHours() < 20,
-      );
-      expect(mean(night.map((p) => p.value as number))).toBeLessThan(
-        mean(day.map((p) => p.value as number)),
-      );
+      const series = daySeries("energy_consumption", seed, INDOOR);
+      expect(meanBetween(series, 1, 4)).toBeLessThan(meanBetween(series, 8, 20));
     }
   });
 
   it("still leaves quiet-floored sensors dark at night", () => {
     for (const seed of SEEDS) {
-      const night = daySeries("light", seed).filter(
+      // A site on the prime meridian, timed in UTC: local clock hours and solar
+      // hours agree, so a UTC-hour filter really does select the night.
+      const night = daySeries("light", seed, { longitude: 0 }).filter(
         (p) => p.at.getUTCHours() >= 22 || p.at.getUTCHours() < 4,
       );
       // A stray photon of noise is fine; a lit room at 3am is not.
@@ -291,10 +330,17 @@ describe("timezone — the diurnal curve follows local time-of-day", () => {
   it("puts the daylight peak at local, not UTC, midday", () => {
     const at = new Date("2026-07-27T23:59:00Z");
     const window = { at, windowMs: 24 * 3600 * 1000, seed: 4 };
+    // A site whose longitude matches its zone, which is what parseParams hands
+    // any request that names a `tz` but no `lon`.
     const brightestLocalHour = (timezone: string, offsetMinutes: number) => {
       const w = generateWindow(
         "irradiance",
-        params({ ...window, timezone, offsetMinutes }),
+        params({
+          ...window,
+          timezone,
+          offsetMinutes,
+          longitude: meridianLongitude(offsetMinutes),
+        }),
       );
       const peak = w.reduce((a, b) => ((b.value as number) > (a.value as number) ? b : a));
       return localHour(peak.at, offsetMinutes);
@@ -309,17 +355,34 @@ describe("timezone — the diurnal curve follows local time-of-day", () => {
     expect(brightestLocalHour("JST", 540)).toBeLessThanOrEqual(14);
   });
 
-  it("shifts the series when the zone changes, and stays deterministic per zone", () => {
+  it("shifts a schedule-driven series when the zone changes, and stays deterministic per zone", () => {
+    // Occupancy runs on the local clock, so the same instant at the same site
+    // lands at a different point in the working day in another zone.
+    const indoor = { seed: 2, placement: "indoor" } as const;
+    const utc = generateReading("air_quality", params(indoor)).value;
+    const edt = generateReading(
+      "air_quality",
+      params({ ...indoor, timezone: "EDT", offsetMinutes: -240 }),
+    ).value;
+    expect(edt).not.toBe(utc);
+    expect(
+      generateReading(
+        "air_quality",
+        params({ ...indoor, timezone: "EDT", offsetMinutes: -240 }),
+      ).value,
+    ).toBe(edt);
+  });
+
+  it("leaves an outdoor thermometer alone when only the clock's label changes", () => {
+    // The sun does not read clocks: at a fixed site and instant, relabelling the
+    // zone must not move the temperature. `?tz=` still moves the *default* site
+    // (see parseParams) and still renders timestamps in the zone.
     const utc = generateReading("temperature", params({ seed: 2 })).value;
     const edt = generateReading(
       "temperature",
       params({ seed: 2, timezone: "EDT", offsetMinutes: -240 }),
     ).value;
-    expect(edt).not.toBe(utc);
-    expect(
-      generateReading("temperature", params({ seed: 2, timezone: "EDT", offsetMinutes: -240 }))
-        .value,
-    ).toBe(edt);
+    expect(edt).toBe(utc);
   });
 
   it("reports the zone and an offset-carrying timestamp on a reading", () => {
@@ -333,14 +396,155 @@ describe("timezone — the diurnal curve follows local time-of-day", () => {
   });
 });
 
+describe("placement — indoor is damped, outdoor is exposed", () => {
+  const JANUARY = new Date("2026-01-15T17:00:00Z");
+
+  it("reads winter as winter outdoors and as a setpoint indoors", () => {
+    const outdoor = generateReading("temperature", params({ at: JANUARY, seed: 3 }));
+    const indoor = generateReading(
+      "temperature",
+      params({ at: JANUARY, seed: 3, placement: "indoor" }),
+    );
+    expect(outdoor.value as number).toBeLessThan(0);
+    expect(indoor.value as number).toBeGreaterThan(15);
+    expect(indoor.value as number).toBeLessThan(28);
+  });
+
+  it("keeps indoor light inside a lit-room range while outdoor light is daylight", () => {
+    const noon = new Date("2026-07-23T17:00:00Z");
+    const outdoor = generateReading("light", params({ at: noon, seed: 3 })).value as number;
+    const indoor = generateReading(
+      "light",
+      params({ at: noon, seed: 3, placement: "indoor" }),
+    ).value as number;
+    expect(outdoor).toBeGreaterThan(20000);
+    expect(indoor).toBeLessThan(3000);
+    expect(indoor).toBeGreaterThan(100);
+  });
+
+  it("inverts the energy day: an exterior meter peaks at night, an indoor one by day", () => {
+    const indoor = daySeries("energy_consumption", 5, { placement: "indoor" });
+    const outdoor = daySeries("energy_consumption", 5, { placement: "outdoor" });
+    expect(meanBetween(indoor, 8, 20)).toBeGreaterThan(meanBetween(indoor, 22, 4));
+    // Dusk-to-dawn lighting: the exterior load is a night load.
+    expect(meanBetween(outdoor, 22, 4)).toBeGreaterThan(meanBetween(outdoor, 8, 20));
+  });
+
+  it("dries the air out indoors in winter, the way a heated room does", () => {
+    const outdoor = generateReading("humidity", params({ at: JANUARY, seed: 1 })).value as number;
+    const indoor = generateReading(
+      "humidity",
+      params({ at: JANUARY, seed: 1, placement: "indoor" }),
+    ).value as number;
+    expect(indoor).toBeLessThan(outdoor);
+    expect(indoor).toBeGreaterThan(0);
+  });
+
+  it("is part of the series identity: the same URL differs by placement alone", () => {
+    const a = generateReading("air_quality", params({ seed: 9, placement: "indoor" })).value;
+    const b = generateReading("air_quality", params({ seed: 9, placement: "outdoor" })).value;
+    expect(a).not.toBe(b);
+  });
+
+  it("echoes the site and placement on a reading", () => {
+    const r = generateReading(
+      "temperature",
+      params({ latitude: -33.87, longitude: 151.21, placement: "indoor" }),
+    );
+    expect(r.location).toEqual({ latitude: -33.87, longitude: 151.21 });
+    expect(r.placement).toBe("indoor");
+  });
+});
+
+describe("location — latitude and longitude drive the sun", () => {
+  const DECEMBER_WINDOW = {
+    at: new Date("2026-12-21T23:59:00Z"),
+    windowMs: 24 * 3600 * 1000,
+    seed: 2,
+  };
+
+  it("gives the far north a polar night and the tropics a working day", () => {
+    const arctic = generateWindow(
+      "irradiance",
+      params({ ...DECEMBER_WINDOW, latitude: 78 }),
+    ).map((p) => p.value as number);
+    const tropics = generateWindow(
+      "irradiance",
+      params({ ...DECEMBER_WINDOW, latitude: 5 }),
+    ).map((p) => p.value as number);
+    expect(Math.max(...arctic)).toBeLessThan(5);
+    expect(Math.max(...tropics)).toBeGreaterThan(400);
+  });
+
+  it("flips the seasons across the equator", () => {
+    const july = new Date("2026-07-23T17:00:00Z");
+    const north = generateReading("temperature", params({ at: july, seed: 4, latitude: 45 }));
+    const south = generateReading("temperature", params({ at: july, seed: 4, latitude: -45 }));
+    expect(north.value as number).toBeGreaterThan(south.value as number);
+    expect(south.max as number).toBeLessThan(north.min as number);
+  });
+
+  it("moves solar noon with longitude inside a single zone", () => {
+    // The centroid of the day's irradiance rather than its argmax: broken cloud
+    // can dim the true peak and move the single brightest sample by an hour.
+    const daylightCentroid = (longitude: number) => {
+      const w = generateWindow(
+        "irradiance",
+        params({
+          at: new Date("2026-07-27T23:59:00Z"),
+          windowMs: 24 * 3600 * 1000,
+          seed: 4,
+          longitude,
+        }),
+      );
+      let weighted = 0;
+      let total = 0;
+      for (const p of w) {
+        const hour = p.at.getUTCHours() + p.at.getUTCMinutes() / 60;
+        weighted += (p.value as number) * hour;
+        total += p.value as number;
+      }
+      return weighted / total;
+    };
+    // 30 degrees of longitude is two hours of solar time; the east peaks earlier.
+    const shift = daylightCentroid(-75) - daylightCentroid(-45);
+    expect(shift).toBeGreaterThan(1.5);
+    expect(shift).toBeLessThan(2.5);
+  });
+
+  it("stays deterministic per site", () => {
+    const site = params({ seed: 6, latitude: 51.5, longitude: -0.13 });
+    expect(generateReading("temperature", site)).toEqual(
+      generateReading("temperature", site),
+    );
+    expect(generateReading("temperature", site).value).not.toBe(
+      generateReading("temperature", params({ seed: 6, latitude: 1, longitude: -0.13 })).value,
+    );
+  });
+});
+
 describe("generateWindow — flow behavior preserved", () => {
-  it("flow is mostly zero overnight with a daytime burst over 24h", () => {
+  it("indoor flow is mostly zero with draw-offs through a working day", () => {
     const w = generateWindow(
       "flow",
-      params({ seed: 7, windowMs: 24 * 3600 * 1000 }),
+      params({ seed: 7, windowMs: 24 * 3600 * 1000, placement: "indoor" }),
     );
     const v = w.map((p) => p.value as number);
     expect(Math.max(...v)).toBeGreaterThan(2);
     expect(v.filter((x) => x < 0.6).length).toBeGreaterThan(v.length / 3);
+  });
+
+  it("outdoor flow is irrigation: a pre-dawn burst in summer, nothing in winter", () => {
+    const summer = generateWindow(
+      "flow",
+      params({ seed: 7, at: new Date("2026-07-27T23:59:00Z"), windowMs: 24 * 3600 * 1000 }),
+    );
+    const winter = generateWindow(
+      "flow",
+      params({ seed: 7, at: new Date("2026-01-15T23:59:00Z"), windowMs: 24 * 3600 * 1000 }),
+    );
+    expect(Math.max(...summer.map((p) => p.value as number))).toBeGreaterThan(2);
+    // A frozen line does not irrigate.
+    expect(Math.max(...winter.map((p) => p.value as number))).toBeLessThan(0.5);
   });
 });

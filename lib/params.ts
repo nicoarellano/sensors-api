@@ -1,11 +1,13 @@
 // Parse and validate query-string parameters into a SensorParams value.
 // Returns a discriminated union so callers can map failures to HTTP 400.
 
-import type { OutputFormat, ParseResult } from "@/lib/types";
+import type { OutputFormat, ParseResult, Placement } from "@/lib/types";
 import { MAX_POINTS } from "@/lib/generator";
+import { DEFAULT_PLACEMENT, REFERENCE_SITE } from "@/lib/realism";
 import {
   DEFAULT_ZONE,
   TIMEZONE_ABBREVIATIONS,
+  meridianLongitude,
   offsetDesignator,
   resolveTimezone,
 } from "@/lib/timezones";
@@ -15,6 +17,11 @@ const FORMATS: Record<string, OutputFormat> = {
   sta: "sta",
   dataarray: "dataArray",
   reading: "reading",
+};
+
+const PLACEMENTS: Record<string, Placement> = {
+  indoor: "indoor",
+  outdoor: "outdoor",
 };
 
 const DURATION_UNITS: Record<string, number> = {
@@ -130,6 +137,58 @@ export function parseParams(
     at = parsed;
   }
 
+  // lat / lon (the site: day length, season, and where solar noon falls)
+  let latitude = REFERENCE_SITE.latitude;
+  const rawLat = searchParams.get("lat") ?? searchParams.get("latitude");
+  if (rawLat !== null) {
+    const n = parseNumber(rawLat);
+    if (n === null || n < -90 || n > 90) {
+      return {
+        ok: false,
+        error: `Invalid lat "${rawLat}": must be a number between -90 and 90 (degrees north).`,
+      };
+    }
+    latitude = n;
+  }
+
+  let longitude: number | null = null;
+  const rawLon =
+    searchParams.get("lon") ??
+    searchParams.get("lng") ??
+    searchParams.get("longitude");
+  if (rawLon !== null) {
+    const n = parseNumber(rawLon);
+    if (n === null || n < -180 || n > 180) {
+      return {
+        ok: false,
+        error: `Invalid lon "${rawLon}": must be a number between -180 and 180 (degrees east).`,
+      };
+    }
+    longitude = n;
+  }
+  // With no explicit longitude, the reference site stands in for its own zone;
+  // any other zone falls back to its central meridian, so solar noon still lands
+  // near local clock noon instead of in the middle of the night.
+  const resolvedLongitude =
+    longitude ??
+    (zone.offsetMinutes === DEFAULT_ZONE.offsetMinutes
+      ? REFERENCE_SITE.longitude
+      : meridianLongitude(zone.offsetMinutes));
+
+  // placement (exposed to the sky, or inside a conditioned space)
+  let placement: Placement = DEFAULT_PLACEMENT;
+  if (searchParams.has("placement")) {
+    const raw = (searchParams.get("placement") ?? "").trim().toLowerCase();
+    const resolved = PLACEMENTS[raw];
+    if (!resolved) {
+      return {
+        ok: false,
+        error: `Invalid placement "${searchParams.get("placement")}": must be indoor or outdoor.`,
+      };
+    }
+    placement = resolved;
+  }
+
   // format (sta default — the OGC SensorThings shape)
   let format: OutputFormat = "sta";
   if (searchParams.has("format")) {
@@ -184,6 +243,9 @@ export function parseParams(
       windowMs,
       timezone: zone.label,
       offsetMinutes: zone.offsetMinutes,
+      latitude,
+      longitude: resolvedLongitude,
+      placement,
     },
   };
 }

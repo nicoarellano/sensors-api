@@ -1,40 +1,33 @@
 // Central sensor registry. Adding or changing a sensor = editing one entry.
 //
-// Continuous `shape(hour)` functions return a normalized value in [0, 1]
-// (position within the effective range), so the same diurnal shape stretches
-// into whatever min/max is in force instead of clipping. Curves are informed
-// by the reference CSVs in public/sensor-examples (smooth low-amplitude
-// thermal diurnals peaking mid-afternoon; flow flat at night with a smooth
-// daytime burst).
+// Each entry is metadata plus a `rule`: how the sensor responds to time, season,
+// site and placement. The rules themselves live in `lib/realism.ts`, where the
+// physics they encode can be stated next to the constants it needs — a rule
+// reads the sun, the weather and the occupancy schedule out of a `ShapeContext`
+// and returns a value in the sensor's own unit.
+//
+// `min`/`max` here are the *nominal* band the manifest advertises. The effective
+// range of a request comes from the rule (an outdoor thermometer's range moves
+// with the season) or from a caller's `min`/`max`.
 //
 // Each entry also carries OGC SensorThings metadata (unitOfMeasurement,
 // observedProperty) and a default sampling `frequency` (ms) so the output can
 // be shaped as OGC Datastream/Observations as well as CSV.
 
+import {
+  airQualityRule,
+  energyRule,
+  flowRule,
+  humidityRule,
+  irradianceRule,
+  lightRule,
+  movementRule,
+  noiseRule,
+  pressureRule,
+  stateRule,
+  temperatureRule,
+} from "@/lib/realism";
 import type { SensorConfig, SensorKind } from "@/lib/types";
-
-const TAU = Math.PI * 2;
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
-
-/** Smooth diurnal curve in [0, 1] peaking at `peakHour`. */
-function diurnal(hour: number, peakHour: number): number {
-  return 0.5 + 0.5 * Math.cos((TAU * (hour - peakHour)) / 24);
-}
-
-/** Half-sine daylight envelope: 0 outside [sunrise, sunset], peak at midpoint. */
-function daylight(hour: number, sunrise: number, sunset: number): number {
-  if (hour <= sunrise || hour >= sunset) return 0;
-  return Math.sin((Math.PI * (hour - sunrise)) / (sunset - sunrise));
-}
-
-/** Gaussian bump centered at `center` hours with the given `width` (hours). */
-function bump(hour: number, center: number, width: number): number {
-  const d = hour - center;
-  return Math.exp(-(d * d) / (2 * width * width));
-}
 
 /** OGC SensorThings observationType URIs (OGC 18-088, Table 8-10). */
 export const OBSERVATION_TYPE = {
@@ -73,8 +66,7 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Temperature",
     },
     noise: 0.06,
-    // Smooth diurnal: coolest before dawn, warmest mid-afternoon (~15h).
-    shape: (h) => diurnal(h, 15),
+    rule: temperatureRule,
   },
   light: {
     unit: "lux",
@@ -92,8 +84,7 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Illuminance",
     },
     noise: 0.05,
-    // Dark at night, peak at solar noon.
-    shape: (h) => daylight(h, 6, 18),
+    rule: lightRule,
   },
   humidity: {
     unit: "%RH",
@@ -111,8 +102,7 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Humidity",
     },
     noise: 0.05,
-    // Inverse of temperature: highest in the cool early morning.
-    shape: (h) => 1 - diurnal(h, 15),
+    rule: humidityRule,
   },
   energy_consumption: {
     unit: "W",
@@ -132,8 +122,7 @@ export const SENSORS = {
     noise: 0.08,
     // Appliances and plant switching on and off through the day.
     eventRate: 5,
-    // Load curve: morning (~8h) and evening (~19h) peaks over a base load.
-    shape: (h) => clamp01(0.12 + 0.88 * Math.max(bump(h, 8, 1.4), bump(h, 19, 2.2))),
+    rule: energyRule,
   },
   movement: {
     unit: "bool",
@@ -147,8 +136,7 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Motion_detection",
     },
     noise: 0,
-    // Sparse occupancy events, biased toward occupied hours (7h–22h).
-    prob: (h) => (h >= 7 && h <= 22 ? 0.35 : 0.03),
+    rule: movementRule,
   },
   air_quality: {
     unit: "ppm",
@@ -168,8 +156,7 @@ export const SENSORS = {
     noise: 0.05,
     // Crowding: a meeting fills a room, CO2 climbs then clears.
     eventRate: 3,
-    // CO2 builds through occupied daytime hours, clears to ~fresh at night.
-    shape: (h) => clamp01(0.04 + 0.92 * bump(h, 14, 4)),
+    rule: airQualityRule,
   },
   atmospheric_pressure: {
     unit: "hPa",
@@ -187,8 +174,7 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Atmospheric_pressure",
     },
     noise: 0.04,
-    // Slow diurnal drift around mid-range; seeded noise adds gentle weather drift.
-    shape: (h) => 0.5 + 0.3 * Math.sin((TAU * h) / 24),
+    rule: pressureRule,
   },
   irradiance: {
     unit: "W/m²",
@@ -206,8 +192,7 @@ export const SENSORS = {
       definition: "https://dbpedia.org/page/Solar_irradiance",
     },
     noise: 0.05,
-    // Correlated with light: same daylight envelope.
-    shape: (h) => daylight(h, 6, 18),
+    rule: irradianceRule,
   },
   flow: {
     unit: "L/min",
@@ -227,8 +212,7 @@ export const SENSORS = {
     noise: 0.04,
     // Draw-offs: a tap or valve opening for a few minutes.
     eventRate: 8,
-    // Flat at night (long zero stretches), smooth daytime burst (~5.5h–20h).
-    shape: (h) => Math.pow(daylight(h, 5.5, 20), 1.2),
+    rule: flowRule,
   },
   state: {
     unit: "state",
@@ -243,10 +227,7 @@ export const SENSORS = {
     },
     noise: 0,
     values: ["on", "off", "idle", "error"],
-    // Weights in [on, off, idle, error] order; mostly on/idle by day,
-    // off/idle by night, error always rare.
-    weights: (h) =>
-      h >= 7 && h <= 22 ? [0.6, 0.05, 0.32, 0.03] : [0.1, 0.5, 0.37, 0.03],
+    rule: stateRule,
   },
   noise_level: {
     unit: "dB",
@@ -266,8 +247,7 @@ export const SENSORS = {
     noise: 0.06,
     // Transients: a door, a vehicle, a dropped object.
     eventRate: 12,
-    // Quiet at night (~30 dB), loud through the day (~80 dB), peak mid-afternoon.
-    shape: (h) => clamp01(0.1 + 0.9 * bump(h, 14, 5)),
+    rule: noiseRule,
   },
 } satisfies Record<string, SensorConfig>;
 

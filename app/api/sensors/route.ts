@@ -3,6 +3,7 @@
 
 import { NextResponse } from "next/server";
 import { SENSORS, SENSOR_TYPES, observationTypeFor } from "@/lib/config";
+import { DEFAULT_PLACEMENT, REFERENCE_SITE } from "@/lib/realism";
 import { DEFAULT_TIMEZONE, TIMEZONE_ABBREVIATIONS } from "@/lib/timezones";
 import type { SensorConfig } from "@/lib/types";
 
@@ -15,6 +16,9 @@ export async function GET() {
       type,
       unit: cfg.unit,
       kind: cfg.kind,
+      // Nominal band. A request's effective range follows the site, the season
+      // and `?placement=` (an outdoor thermometer in January reads below zero),
+      // or a caller's own `min`/`max`.
       min: cfg.min,
       max: cfg.max,
       frequency: cfg.frequency,
@@ -37,6 +41,18 @@ export async function GET() {
       // otherwise. Explicit offsets like `UTC-05:00` are accepted too.
       defaultTimezone: DEFAULT_TIMEZONE,
       timezones: TIMEZONE_ABBREVIATIONS,
+      // Site the series are generated for unless `?lat=`/`?lon=` say otherwise.
+      // Latitude sets day length and the seasonal climate; longitude sets where
+      // solar noon falls on the local clock. A request that names a `tz` but no
+      // longitude gets that zone's central meridian instead of this one.
+      defaultLocation: {
+        latitude: REFERENCE_SITE.latitude,
+        longitude: REFERENCE_SITE.longitude,
+      },
+      // Whether a sensor is exposed to the sky or sits inside a conditioned
+      // space, via `?placement=`.
+      defaultPlacement: DEFAULT_PLACEMENT,
+      placements: ["indoor", "outdoor"],
       sensors,
     },
     { headers: { "Cache-Control": "public, max-age=60" } },

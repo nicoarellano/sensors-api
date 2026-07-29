@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { formatCsv, formatSta, formatDataArray, clockTime } from "@/lib/format";
-import { generateWindow } from "@/lib/generator";
+import { generateWindow, readingRange } from "@/lib/generator";
 import { SENSORS, OBSERVATION_TYPE } from "@/lib/config";
 import type { SensorParams } from "@/lib/types";
 
 const AT = new Date("2026-07-23T14:05:00Z");
 const ORIGIN = "https://sensors.example";
 
-/** Base params; UTC unless a test is specifically about the timezone. */
+/** Base params; UTC at the reference site unless a test says otherwise. */
 function params(overrides: Partial<SensorParams> = {}): SensorParams {
   return {
     seed: 2,
@@ -16,11 +16,18 @@ function params(overrides: Partial<SensorParams> = {}): SensorParams {
     points: 20,
     timezone: "UTC",
     offsetMinutes: 0,
+    latitude: 45,
+    longitude: -75,
+    placement: "outdoor",
     ...overrides,
   };
 }
 
 const EDT = params({ timezone: "EDT", offsetMinutes: -240 });
+
+/** The site/zone query links carry so that following one reproduces the series. */
+const SITE_QUERY = "&tz=UTC&lat=45&lon=-75&placement=outdoor";
+const EDT_SITE_QUERY = "&tz=EDT&lat=45&lon=-75&placement=outdoor";
 
 /** Replicates the exact parser in core-local Sensor.tsx / CollapsibleSensorItem.tsx. */
 function parseLikeCdt(csv: string): { time: string; value: number }[] {
@@ -52,12 +59,13 @@ describe("formatCsv — matches the CDT SensorChart contract", () => {
   it("is header-less time,value and parses cleanly for a continuous sensor", () => {
     const csv = formatCsv("temperature", generateWindow("temperature", params()), 0);
     const rows = parseLikeCdt(csv);
+    const range = readingRange("temperature", params());
     expect(rows).toHaveLength(20);
     for (const row of rows) {
       expect(row.time).toMatch(/^\d{1,2}:\d{2}:\d{2}$/);
       expect(Number.isNaN(row.value)).toBe(false);
-      expect(row.value).toBeGreaterThanOrEqual(SENSORS.temperature.min);
-      expect(row.value).toBeLessThanOrEqual(SENSORS.temperature.max);
+      expect(row.value).toBeGreaterThanOrEqual(range.min);
+      expect(row.value).toBeLessThanOrEqual(range.max);
     }
     // No header row.
     expect(csv.split("\n")[0]).not.toMatch(/time/i);
@@ -124,7 +132,9 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
 
     // Datastream annotations.
     expect(typeof ds["@iot.id"]).toBe("number");
-    expect(ds["@iot.selfLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=sta&tz=UTC`);
+    expect(ds["@iot.selfLink"]).toBe(
+      `${ORIGIN}/api/sensor/temperature?format=sta${SITE_QUERY}`,
+    );
     expect(ds.name).toBe(SENSORS.temperature.observedProperty.name);
     expect(ds.resultTime).toBe(ds.phenomenonTime);
     expect(ds.properties).toEqual({
@@ -132,6 +142,7 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
       frequency: SENSORS.temperature.frequency,
       generator: "sensors-api",
       timezone: "UTC",
+      placement: "outdoor",
     });
 
     // Related entities are expanded inline with matching ids.
@@ -141,7 +152,9 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
     expect(ds.ObservedProperty.definition).toBe(SENSORS.temperature.observedProperty.definition);
 
     // Observations navigation resolves to the real dataArray endpoint.
-    expect(ds["Observations@iot.navigationLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=dataArray&tz=UTC`);
+    expect(ds["Observations@iot.navigationLink"]).toBe(
+      `${ORIGIN}/api/sensor/temperature?format=dataArray${SITE_QUERY}`,
+    );
     expect(ds["Observations@iot.count"]).toBe(points.length);
     expect(ds.Observations[0]["@iot.id"]).toBe(1);
     expect(ds.Observations[points.length - 1]["@iot.id"]).toBe(points.length);
@@ -150,6 +163,47 @@ describe("formatSta — OGC SensorThings Datastream + Observations", () => {
   it("nulls the unitOfMeasurement trio for unitless (category) sensors", () => {
     const ds = formatSta("state", params(), generateWindow("state", params()), ORIGIN);
     expect(ds.unitOfMeasurement).toEqual({ name: null, symbol: null, definition: null });
+  });
+});
+
+describe("formatSta — site geography", () => {
+  it("places the site as GeoJSON on observedArea, Location and FeatureOfInterest", () => {
+    const site = params({ latitude: 48.86, longitude: 2.35 });
+    const ds = formatSta("temperature", site, generateWindow("temperature", site), ORIGIN);
+    // GeoJSON is [longitude, latitude], not [lat, lon].
+    const point = { type: "Point", coordinates: [2.35, 48.86] };
+    expect(ds.observedArea).toEqual(point);
+    expect(ds.Thing.Locations[0].location).toEqual(point);
+    expect(ds.FeatureOfInterest.feature).toEqual(point);
+    expect(ds.Thing.Locations[0].encodingType).toBe("application/geo+json");
+    expect(ds.FeatureOfInterest.encodingType).toBe("application/geo+json");
+  });
+
+  it("reports the site and placement on the Thing", () => {
+    const ds = formatSta("temperature", EDT, generateWindow("temperature", EDT), ORIGIN);
+    expect(ds.Thing.properties).toEqual({
+      placement: "outdoor",
+      latitude: 45,
+      longitude: -75,
+      timezone: "EDT",
+    });
+    expect(ds.Thing.name).toBe("Synthetic outdoor site");
+    expect(ds.Thing.Locations[0].name).toBe("45.00 N, 75.00 W");
+  });
+
+  it("names the hemisphere a human would read off a map", () => {
+    const south = params({ latitude: -33.87, longitude: 151.21 });
+    const ds = formatSta("temperature", south, generateWindow("temperature", south), ORIGIN);
+    expect(ds.Thing.Locations[0].name).toBe("33.87 S, 151.21 E");
+  });
+
+  it("echoes placement in properties and carries the whole site on the links", () => {
+    const indoor = params({ placement: "indoor" });
+    const ds = formatSta("temperature", indoor, generateWindow("temperature", indoor), ORIGIN);
+    expect(ds.properties.placement).toBe("indoor");
+    expect(ds["@iot.selfLink"]).toBe(
+      `${ORIGIN}/api/sensor/temperature?format=sta&tz=UTC&lat=45&lon=-75&placement=indoor`,
+    );
   });
 });
 
@@ -193,9 +247,11 @@ describe("timezone rendering", () => {
   it("reports the zone in properties and carries it on the links", () => {
     const ds = formatSta("temperature", EDT, generateWindow("temperature", EDT), ORIGIN);
     expect(ds.properties.timezone).toBe("EDT");
-    expect(ds["@iot.selfLink"]).toBe(`${ORIGIN}/api/sensor/temperature?format=sta&tz=EDT`);
+    expect(ds["@iot.selfLink"]).toBe(
+      `${ORIGIN}/api/sensor/temperature?format=sta${EDT_SITE_QUERY}`,
+    );
     expect(ds["Observations@iot.navigationLink"]).toBe(
-      `${ORIGIN}/api/sensor/temperature?format=dataArray&tz=EDT`,
+      `${ORIGIN}/api/sensor/temperature?format=dataArray${EDT_SITE_QUERY}`,
     );
   });
 
@@ -203,7 +259,7 @@ describe("timezone rendering", () => {
     const zone = params({ timezone: "UTC+05:30", offsetMinutes: 330 });
     const ds = formatSta("temperature", zone, generateWindow("temperature", zone), ORIGIN);
     expect(ds["@iot.selfLink"]).toBe(
-      `${ORIGIN}/api/sensor/temperature?format=sta&tz=UTC%2B05%3A30`,
+      `${ORIGIN}/api/sensor/temperature?format=sta&tz=UTC%2B05%3A30&lat=45&lon=-75&placement=outdoor`,
     );
   });
 

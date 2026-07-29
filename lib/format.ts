@@ -3,7 +3,9 @@
 //     SensorChart (which fetches a Data URL and parses CSV).
 // Times are rendered in the requested timezone (see lib/timezones.ts): CSV as a
 // local `H:MM:SS` clock, STA/dataArray as ISO 8601 carrying the zone's offset.
-//   - STA: an OGC SensorThings Datastream with embedded Observations.
+//   - STA: an OGC SensorThings Datastream with embedded Observations, plus the
+//     site the series was generated for as a Thing + Location + FeatureOfInterest
+//     (GeoJSON Point from `?lat=`/`?lon=`) and its `?placement=`.
 //   - dataArray: the compact OGC `{components, dataArray}` time-series form.
 
 import {
@@ -13,6 +15,7 @@ import {
   type SensorType,
 } from "@/lib/config";
 import type {
+  Placement,
   SensorParams,
   UnitOfMeasurement,
   WindowPoint,
@@ -41,7 +44,7 @@ function sensorDescription(type: SensorType): string {
   const kind = SENSORS[type].kind;
   if (kind === "binary") return "Deterministic occupancy-style event generator.";
   if (kind === "enum") return "Deterministic categorical state generator.";
-  return "Deterministic diurnal curve + seeded noise.";
+  return "Deterministic solar and climate model + seeded noise.";
 }
 
 export interface StaObservation {
@@ -49,6 +52,49 @@ export interface StaObservation {
   phenomenonTime: string;
   resultTime: string;
   result: StaResult;
+}
+
+/** GeoJSON Point — the encoding STA uses for locations and observed areas. */
+export interface GeoJsonPoint {
+  type: "Point";
+  /** `[longitude, latitude]`, GeoJSON axis order (x, y). */
+  coordinates: [number, number];
+}
+
+/** STA encodingType for a GeoJSON-encoded location or feature. */
+const GEO_JSON_ENCODING_TYPE = "application/geo+json";
+
+/** STA Location entity: where the Thing is. */
+export interface StaLocation {
+  "@iot.id": number;
+  name: string;
+  description: string;
+  encodingType: string;
+  location: GeoJsonPoint;
+}
+
+/** STA Thing entity: the sensor's host — the site the request asked for. */
+export interface StaThing {
+  "@iot.id": number;
+  name: string;
+  description: string;
+  properties: {
+    placement: Placement;
+    latitude: number;
+    longitude: number;
+    timezone: string;
+  };
+  "Locations@iot.navigationLink": string;
+  Locations: StaLocation[];
+}
+
+/** STA FeatureOfInterest: the thing actually being observed. */
+export interface StaFeatureOfInterest {
+  "@iot.id": number;
+  name: string;
+  description: string;
+  encodingType: string;
+  feature: GeoJsonPoint;
 }
 
 /** STA Sensor entity: the procedure/instrument that produced the observations. */
@@ -75,6 +121,8 @@ export interface StaDatastream {
   description: string;
   observationType: string;
   unitOfMeasurement: UnitOfMeasurement;
+  /** Standard STA field: the area these observations describe — here, the site. */
+  observedArea: GeoJsonPoint;
   phenomenonTime: string;
   resultTime: string;
   properties: {
@@ -83,11 +131,22 @@ export interface StaDatastream {
     generator: string;
     /** Zone the observation timestamps and the diurnal curve are expressed in. */
     timezone: string;
+    /** Whether the series was generated exposed to the sky or indoors. */
+    placement: Placement;
   };
+  "Thing@iot.navigationLink": string;
+  Thing: StaThing;
   "Sensor@iot.navigationLink": string;
   Sensor: StaSensor;
   "ObservedProperty@iot.navigationLink": string;
   ObservedProperty: StaObservedProperty;
+  /**
+   * STA hangs a FeatureOfInterest off each Observation. Every observation in a
+   * synthetic series shares one site, so it is carried once here instead of
+   * being repeated hundreds of times.
+   */
+  "FeatureOfInterest@iot.navigationLink": string;
+  FeatureOfInterest: StaFeatureOfInterest;
   "Observations@iot.navigationLink": string;
   "Observations@iot.count": number;
   Observations: StaObservation[];
@@ -141,6 +200,18 @@ export function formatCsv(
     .join("\n");
 }
 
+/** `45.00 N, 75.00 W` — a site named the way a human would read it off a map. */
+function siteLabel(latitude: number, longitude: number): string {
+  const ns = latitude >= 0 ? "N" : "S";
+  const ew = longitude >= 0 ? "E" : "W";
+  return `${Math.abs(latitude).toFixed(2)} ${ns}, ${Math.abs(longitude).toFixed(2)} ${ew}`;
+}
+
+/** The request's site as a GeoJSON Point (longitude first, per GeoJSON). */
+function sitePoint(params: SensorParams): GeoJsonPoint {
+  return { type: "Point", coordinates: [params.longitude, params.latitude] };
+}
+
 /**
  * OGC SensorThings Datastream entity graph with embedded Observations.
  * `origin` is the request origin (e.g. `https://host`) used to build absolute
@@ -155,9 +226,12 @@ export function formatSta(
   const cfg = SENSORS[type];
   const id = sensorIotId(type);
   const base = `${origin}/api/sensor/${type}`;
-  // Links carry the zone so following one reproduces this series.
-  const tz = `&tz=${encodeURIComponent(params.timezone)}`;
-  const selfLink = `${base}?format=sta${tz}`;
+  // Links carry the zone, the site and the placement, so following one
+  // reproduces this exact series.
+  const site = `&tz=${encodeURIComponent(params.timezone)}&lat=${params.latitude}&lon=${params.longitude}&placement=${params.placement}`;
+  const selfLink = `${base}?format=sta${site}`;
+  const point = sitePoint(params);
+  const label = siteLabel(params.latitude, params.longitude);
 
   const observations: StaObservation[] = points.map((p, i) => {
     const iso = isoWithOffset(p.at, params.offsetMinutes);
@@ -181,6 +255,7 @@ export function formatSta(
     description: `Synthetic ${cfg.observedProperty.name} datastream for ${type}.`,
     observationType: observationTypeFor(cfg.kind),
     unitOfMeasurement: cfg.unitOfMeasurement,
+    observedArea: point,
     phenomenonTime: interval,
     resultTime: interval,
     properties: {
@@ -188,6 +263,29 @@ export function formatSta(
       frequency: cfg.frequency,
       generator: "sensors-api",
       timezone: params.timezone,
+      placement: params.placement,
+    },
+    "Thing@iot.navigationLink": selfLink,
+    Thing: {
+      "@iot.id": 1,
+      name: `Synthetic ${params.placement} site`,
+      description: `Simulated ${params.placement} sensor host at ${label}, timed in ${params.timezone}.`,
+      properties: {
+        placement: params.placement,
+        latitude: params.latitude,
+        longitude: params.longitude,
+        timezone: params.timezone,
+      },
+      "Locations@iot.navigationLink": selfLink,
+      Locations: [
+        {
+          "@iot.id": 1,
+          name: label,
+          description: `Generation site for this series (${params.placement}).`,
+          encodingType: GEO_JSON_ENCODING_TYPE,
+          location: point,
+        },
+      ],
     },
     "Sensor@iot.navigationLink": selfLink,
     Sensor: {
@@ -204,7 +302,15 @@ export function formatSta(
       definition: cfg.observedProperty.definition,
       description: cfg.observedProperty.name,
     },
-    "Observations@iot.navigationLink": `${base}?format=dataArray${tz}`,
+    "FeatureOfInterest@iot.navigationLink": selfLink,
+    FeatureOfInterest: {
+      "@iot.id": 1,
+      name: label,
+      description: `The ${params.placement} air observed at ${label}.`,
+      encodingType: GEO_JSON_ENCODING_TYPE,
+      feature: point,
+    },
+    "Observations@iot.navigationLink": `${base}?format=dataArray${site}`,
     "Observations@iot.count": observations.length,
     Observations: observations,
   };

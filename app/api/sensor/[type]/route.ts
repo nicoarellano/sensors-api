@@ -8,6 +8,9 @@
 //   ?points=N | ?window=24h   window sizing (see lib/params.ts)
 //   ?tz=EDT            (default) timezone abbreviation the series is timed in
 //                      (`?timezone=` also accepted; see lib/timezones.ts)
+//   ?lat=45&lon=-75    (default) the site: day length, season, solar noon
+//   ?placement=outdoor (default) exposed to the sky, or `indoor` behind glazing
+//                      and a control system (see lib/realism.ts)
 
 import { NextResponse, type NextRequest } from "next/server";
 import { SENSOR_TYPES, isSensorType } from "@/lib/config";

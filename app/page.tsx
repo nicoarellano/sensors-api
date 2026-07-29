@@ -15,12 +15,16 @@ interface ManifestEntry {
 interface Manifest {
   count: number;
   sensors: ManifestEntry[];
+  defaultLocation?: { latitude: number; longitude: number };
+  defaultPlacement?: Placement;
 }
 
 interface Point {
   time: string;
   value: number;
 }
+
+type Placement = "indoor" | "outdoor";
 
 // Sensors shown as live tiles. The rest are listed in the table below.
 const LIVE = ["temperature", "flow", "humidity", "energy_consumption"];
@@ -140,6 +144,45 @@ const PARAMS: ParamDoc[] = [
     ),
   },
   {
+    name: "lat",
+    type: "-90 … 90",
+    fallback: "45",
+    desc: (
+      <>
+        Site latitude in degrees north. Sets day length, the height of the sun and
+        the seasonal climate, so a January series at <M>lat=45</M> is genuinely
+        below freezing and one at <M>lat=5</M> is not. <M>latitude</M> is accepted
+        as an alias.
+      </>
+    ),
+  },
+  {
+    name: "lon",
+    type: "-180 … 180",
+    fallback: "-75",
+    desc: (
+      <>
+        Site longitude in degrees east (negative in the Americas). Sets where solar
+        noon falls on the local clock. Pass a <M>tz</M> without a <M>lon</M> and the
+        zone&apos;s central meridian is used, so noon stays noon. <M>lng</M> and{" "}
+        <M>longitude</M> are accepted as aliases.
+      </>
+    ),
+  },
+  {
+    name: "placement",
+    type: "indoor | outdoor",
+    fallback: "outdoor",
+    desc: (
+      <>
+        Where the sensor sits. <M>outdoor</M> is exposed to the real sky and the real
+        seasonal air temperature; <M>indoor</M> sits behind glazing and a control
+        system, so it is damped, lagged and held near a setpoint. The same URL reads
+        -13 °C outdoors and 19 °C indoors in January.
+      </>
+    ),
+  },
+  {
     name: "tz",
     type: "abbreviation or offset",
     fallback: "EDT",
@@ -157,6 +200,23 @@ const PARAMS: ParamDoc[] = [
 
 /** Notable changes, newest first — see the README for the full reference. */
 const CHANGES: { title: string; body: ReactNode }[] = [
+  {
+    title: "Location and placement",
+    body: (
+      <>
+        Values now come from a physical model of the site rather than a fixed daily
+        curve. <M>?lat=</M>/<M>?lon=</M> set where the sensor is: latitude drives day
+        length and the seasonal climate, longitude drives where solar noon lands on
+        the clock. <M>?placement=outdoor</M> (the default) is exposed to the real sky
+        and the real seasonal air temperature, so January reads below freezing;{" "}
+        <M>?placement=indoor</M> is damped, lagged and held near a setpoint, with
+        occupancy driving CO₂, lighting, water and noise. Light, temperature and
+        irradiance now agree about the weather, so one overcast afternoon dims all
+        three. The STA response carries the site as a <M>Thing</M> +{" "}
+        <M>Location</M> + <M>FeatureOfInterest</M> in GeoJSON.
+      </>
+    ),
+  },
   {
     title: "Timezones",
     body: (
@@ -234,7 +294,7 @@ function Sparkline({ points, color }: { points: Point[]; color: string }) {
   );
 }
 
-function LiveTile({ entry }: { entry: ManifestEntry }) {
+function LiveTile({ entry, placement }: { entry: ManifestEntry; placement: Placement }) {
   const [points, setPoints] = useState<Point[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -242,9 +302,10 @@ function LiveTile({ entry }: { entry: ManifestEntry }) {
     let active = true;
     const tick = async () => {
       try {
-        const res = await fetch(`/api/sensor/${entry.type}?seed=1&points=${TILE_POINTS}&format=csv`, {
-          cache: "no-store",
-        });
+        const res = await fetch(
+          `/api/sensor/${entry.type}?seed=1&points=${TILE_POINTS}&format=csv&placement=${placement}`,
+          { cache: "no-store" },
+        );
         const text = await res.text();
         if (active) {
           setPoints(parseCsv(text));
@@ -260,7 +321,7 @@ function LiveTile({ entry }: { entry: ManifestEntry }) {
       active = false;
       clearInterval(id);
     };
-  }, [entry.type]);
+  }, [entry.type, placement]);
 
   const current = points.length ? points[points.length - 1].value : null;
 
@@ -281,7 +342,9 @@ function LiveTile({ entry }: { entry: ManifestEntry }) {
         )}
       </div>
       <Sparkline points={points} color="var(--spark)" />
-      <div className="text-[11px] text-foreground/40 font-mono">{points.length} pts · {entry.type} CSV</div>
+      <div className="text-[11px] text-foreground/40 font-mono">
+        {points.length} pts · {placement} · CSV
+      </div>
     </div>
   );
 }
@@ -313,8 +376,39 @@ function CopyUrl({ path }: { path: string }) {
   );
 }
 
+/** Two-way switch for a query parameter whose effect you can watch live. */
+function Toggle<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: readonly T[];
+  value: T;
+  onChange: (next: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded border border-black/15 dark:border-white/20 overflow-hidden text-xs">
+      {options.map((option) => (
+        <button
+          key={option}
+          onClick={() => onChange(option)}
+          aria-pressed={option === value}
+          className={`px-2.5 py-1 font-mono ${
+            option === value
+              ? "bg-blue-600 text-white"
+              : "hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+          }`}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function Home() {
   const [manifest, setManifest] = useState<Manifest | null>(null);
+  const [placement, setPlacement] = useState<Placement>("outdoor");
   // Client-only origin so the table shows full, copy-pasteable URLs (SSR renders the
   // bare path; the anchor carries suppressHydrationWarning). Same pattern as CopyUrl.
   const origin = typeof window === "undefined" ? "" : window.location.origin;
@@ -327,27 +421,46 @@ export default function Home() {
   }, []);
 
   const liveEntries = (manifest?.sensors ?? []).filter((s) => LIVE.includes(s.type));
+  const site = manifest?.defaultLocation ?? { latitude: 45, longitude: -75 };
 
   return (
     <main className="max-w-5xl mx-auto px-6 py-12 flex flex-col gap-10" style={{ ["--spark" as string]: "#2563eb" }}>
       <header className="flex flex-col gap-2">
         <h1 className="text-2xl font-semibold">Synthetic Sensor API</h1>
         <p className="text-foreground/60 max-w-2xl">
-          Deterministic, OGC-SensorThings-shaped synthetic sensor data. Each reading follows a
-          diurnal curve plus gentle seeded noise, so the same URL is reproducible while readings
-          still fluctuate. Returns an OGC SensorThings Datastream by default — paste the URL
-          straight into a CollabDT sensor (Data format = Json). CSV, dataArray, and reading
-          formats are available via <span className="font-mono">?format=</span>. Time-of-day is read
-          in <span className="font-mono">EDT</span> by default; pass any timezone abbreviation with{" "}
-          <span className="font-mono">?tz=</span> (e.g. <span className="font-mono">?tz=PST</span>).
+          Deterministic, OGC-SensorThings-shaped synthetic sensor data. Each reading comes from a
+          physical model of a site (the sun where you put it, the season, the weather, and the
+          people in the building) plus gentle seeded noise, so the same URL is reproducible while
+          readings still fluctuate. Returns an OGC SensorThings Datastream by default: paste the
+          URL straight into a CollabDT sensor (Data format = Json). CSV, dataArray, and reading
+          formats are available via <span className="font-mono">?format=</span>. The default site is{" "}
+          <span className="font-mono">?lat=45&amp;lon=-75</span> in{" "}
+          <span className="font-mono">EDT</span>, exposed to the sky
+          (<span className="font-mono">?placement=outdoor</span>); move it with{" "}
+          <span className="font-mono">?lat=</span>/<span className="font-mono">?lon=</span>/
+          <span className="font-mono">?tz=</span>, or bring it inside with{" "}
+          <span className="font-mono">?placement=indoor</span>.
         </p>
       </header>
 
       <section className="flex flex-col gap-4">
-        <h2 className="text-sm uppercase tracking-wide text-foreground/50">Live (polling every {POLL_MS / 1000}s)</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm uppercase tracking-wide text-foreground/50">Live (polling every {POLL_MS / 1000}s)</h2>
+          <Toggle
+            options={["outdoor", "indoor"] as const}
+            value={placement}
+            onChange={setPlacement}
+          />
+        </div>
+        <p className="text-sm text-foreground/60 max-w-2xl">
+          Generated for {site.latitude}, {site.longitude}. Swap the placement to
+          watch the same sensors move behind glazing and a control system: outdoors
+          follows the real sky and the season, indoors is damped and held near a
+          setpoint, with occupancy driving CO₂, lighting, water and noise.
+        </p>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {liveEntries.map((entry) => (
-            <LiveTile key={entry.type} entry={entry} />
+            <LiveTile key={entry.type} entry={entry} placement={placement} />
           ))}
         </div>
       </section>
@@ -465,6 +578,10 @@ export default function Home() {
             "/api/sensor/state?format=csv",
             "/api/sensor/temperature?tz=PDT&window=24h&format=csv",
             "/api/sensor/temperature?timezone=utc&format=dataArray&points=50",
+            "/api/sensor/temperature?placement=indoor&window=24h&format=csv",
+            "/api/sensor/temperature?at=2026-01-15T12:00:00&window=24h&format=csv",
+            "/api/sensor/light?lat=78&lon=15&tz=CET&at=2026-12-21T12:00:00&window=24h&format=csv",
+            "/api/sensor/air_quality?placement=indoor&window=24h&format=csv",
           ].map((href) => (
             <li key={href}>
               <a className="text-blue-600 dark:text-blue-400 hover:underline break-all" href={href} target="_blank" rel="noreferrer">

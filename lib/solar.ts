@@ -274,9 +274,11 @@ export function climate(
   const diurnalRangeC = (8 + 4 * summerness) * (1 - 0.35 * clamp01(cloud));
 
   // In a humid continental climate the dew point sits just below the daily
-  // minimum: cloudy air is closer to saturation, clear air a little drier.
+  // minimum: cloudy air is closer to saturation, clear air a little drier. It
+  // stays strictly below that minimum, so overnight humidity climbs toward
+  // saturation without pinning at 100% every cloudy night.
   const dailyMinC = meanC - diurnalRangeC / 2;
-  const dewPointC = dailyMinC - 1 + 3 * clamp01(cloud);
+  const dewPointC = dailyMinC - 2.5 + 2 * clamp01(cloud);
 
   return { meanC, diurnalRangeC, dewPointC, summerness };
 }

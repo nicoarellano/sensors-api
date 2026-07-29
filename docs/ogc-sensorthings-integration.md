@@ -4,11 +4,10 @@
 **Purpose:** describe the enriched OGC SensorThings (STA, OGC 18-088) responses this
 API serves, and how to consume them in a standards-aligned way.
 
-> **Status.** This documents the **target** contract for the enriched `format=sta`
-> response (STA entity graph + `@iot.*` annotations). The other formats (`csv`,
-> `dataArray`, `reading`) and all query params are already live. Consume defensively:
-> read the fields you need, ignore the rest — every field below is additive and safe
-> to skip.
+> **Status.** Everything below is live: all four formats, the full `format=sta`
+> entity graph (`@iot.*` annotations, `Thing`/`Location`/`FeatureOfInterest`), and
+> every query parameter. Consume defensively: read the fields you need, ignore the
+> rest — every field is additive and safe to skip.
 
 Reference deployment: `https://sensors-api-tau.vercel.app` (substitute your own).
 CORS: `Access-Control-Allow-Origin: *` on `/api/*`, so a browser client can fetch
@@ -40,10 +39,21 @@ GET /api/sensor/{type}?format={sta|csv|dataArray|reading}&…
 | `points` | integer ≥ 1     | `288`   | Number of samples, spaced at the type's frequency. Capped at **1000**. |
 | `window` | duration string | —       | Total span (`24h`, `90m`, `30s`, `1500ms`, or bare seconds). Samples at the type's frequency, **downsampled to ≤ 1000 points**. Overrides `points`. |
 | `seed`   | integer         | `0`     | Deterministic PRNG seed. Same seed+time+params ⇒ same values. |
-| `min`    | number          | type default | Override the lower bound (continuous only). |
-| `max`    | number          | type default | Override the upper bound (continuous only). |
+| `min`    | number          | rule's range | Override the lower bound (continuous only). |
+| `max`    | number          | rule's range | Override the upper bound (continuous only). |
 | `at`     | ISO 8601        | now     | End the window at a fixed instant (for reproducible tests). Without a zone designator it is read in `tz`. |
 | `tz`     | timezone abbr   | `EDT`   | Zone the series is timed in. Case-insensitive; `timezone=` is an accepted alias; explicit offsets (`UTC-05:00`, `-0500`) work too. Invalid → 400. |
+| `lat`    | -90 … 90        | `45`    | Site latitude, degrees north. Sets day length, sun height and the seasonal climate. `latitude=` is an alias. Invalid → 400. |
+| `lon`    | -180 … 180      | `-75`   | Site longitude, degrees east. Sets where solar noon falls on the local clock; with a `tz` and no `lon`, that zone's central meridian is used. `lng=`/`longitude=` are aliases. Invalid → 400. |
+| `placement` | enum         | `outdoor` | `outdoor` \| `indoor`. Exposed to the sky, or behind glazing and a control system. Invalid → 400. |
+
+**Location and placement.** These are generation inputs, not decoration: an
+`outdoor` thermometer at `lat=45` reports the season (below freezing in January),
+while `indoor` is damped and held near a setpoint. The site appears in the
+response as `observedArea`, `Thing.Locations[].location` and
+`FeatureOfInterest.feature` (§3), and both are echoed in `properties` and carried
+on every link, so following a link reproduces the same series. Full behavior table
+in the [README](../README.md#location-and-placement).
 
 **Timezone.** `tz` is a **fixed offset** named by abbreviation (`EST` vs `EDT`,
 no DST transition rules), which keeps a URL reproducible. It does two things:
@@ -63,13 +73,17 @@ updated tip.
 
 ## 3. `format=sta` — the STA Datastream graph
 
-A single **Datastream** entity that links a **Sensor** and an **ObservedProperty**
-and embeds its **Observations**, with standard `@iot.*` annotations.
+A single **Datastream** entity that links a **Thing** (with its **Location**), a
+**Sensor** and an **ObservedProperty**, carries a **FeatureOfInterest**, and
+embeds its **Observations**, with standard `@iot.*` annotations.
+
+`$SITE` below stands for `&tz=EDT&lat=45&lon=-75&placement=outdoor` — the zone and
+site of the request, appended to every link so following one reproduces the series.
 
 ```jsonc
 {
   "@iot.id": 1,
-  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
+  "@iot.selfLink": "https://<host>/api/sensor/temperature?format=sta$SITE",
   "name": "Air Temperature",
   "description": "Synthetic Air Temperature datastream for temperature.",
   "observationType": "http://www.opengis.net/def/observationType/OGC-OM/2.0/OM_Measurement",
@@ -78,20 +92,42 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
     "symbol": "°C",
     "definition": "https://qudt.org/vocab/unit/DEG_C"
   },
+  "observedArea": { "type": "Point", "coordinates": [-75, 45] },
   "phenomenonTime": "2026-07-23T10:30:00.000-04:00/2026-07-24T10:30:00.000-04:00",
   "resultTime":     "2026-07-23T10:30:00.000-04:00/2026-07-24T10:30:00.000-04:00",
-  "properties": { "seed": 0, "frequency": 300000, "generator": "sensors-api", "timezone": "EDT" },
+  "properties": {
+    "seed": 0, "frequency": 300000, "generator": "sensors-api",
+    "timezone": "EDT", "placement": "outdoor"
+  },
 
-  "Sensor@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
+  "Thing@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta$SITE",
+  "Thing": {
+    "@iot.id": 1,
+    "name": "Synthetic outdoor site",
+    "description": "Simulated outdoor sensor host at 45.00 N, 75.00 W, timed in EDT.",
+    "properties": { "placement": "outdoor", "latitude": 45, "longitude": -75, "timezone": "EDT" },
+    "Locations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta$SITE",
+    "Locations": [
+      {
+        "@iot.id": 1,
+        "name": "45.00 N, 75.00 W",
+        "description": "Generation site for this series (outdoor).",
+        "encodingType": "application/geo+json",
+        "location": { "type": "Point", "coordinates": [-75, 45] }
+      }
+    ]
+  },
+
+  "Sensor@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta$SITE",
   "Sensor": {
     "@iot.id": 1,
     "name": "Synthetic temperature sensor",
-    "description": "Deterministic diurnal curve + seeded noise.",
+    "description": "Deterministic solar and climate model + seeded noise.",
     "encodingType": "text/html",
     "metadata": "https://github.com/nicoarellano/sensors-api"
   },
 
-  "ObservedProperty@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta&tz=EDT",
+  "ObservedProperty@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta$SITE",
   "ObservedProperty": {
     "@iot.id": 1,
     "name": "Air Temperature",
@@ -99,7 +135,16 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
     "description": "Air Temperature"
   },
 
-  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray&tz=EDT",
+  "FeatureOfInterest@iot.navigationLink": "https://<host>/api/sensor/temperature?format=sta$SITE",
+  "FeatureOfInterest": {
+    "@iot.id": 1,
+    "name": "45.00 N, 75.00 W",
+    "description": "The outdoor air observed at 45.00 N, 75.00 W.",
+    "encodingType": "application/geo+json",
+    "feature": { "type": "Point", "coordinates": [-75, 45] }
+  },
+
+  "Observations@iot.navigationLink": "https://<host>/api/sensor/temperature?format=dataArray$SITE",
   "Observations@iot.count": 288,
   "Observations": [
     {
@@ -121,19 +166,27 @@ and embeds its **Observations**, with standard `@iot.*` annotations.
 | `name`, `description` | string | Human labels. `name` is the observed property name; safe as a chart title. |
 | `observationType` | string (URI) | OGC OM type; see §7. Tells you the `result` type. |
 | `unitOfMeasurement` | `{ name, symbol, definition }` | UCUM/QUDT unit. **All three are `null`** for unitless kinds (`movement`, `state`). `symbol` is what you show on the chart. |
+| `observedArea` | GeoJSON `Point` | The site the series was generated for, `[longitude, latitude]`. Standard STA field. |
 | `phenomenonTime` / `resultTime` | string | ISO 8601 **interval** `start/end` covering the window, in the `tz` offset. Use for the chart's time-axis domain. |
-| `properties` | object | Non-standard extras under the standard `properties` bag: `seed`, `frequency` (ms), `generator`, `timezone` (the `tz` in force). (Phase 2: CDT display hints will land here / on a Thing — see §8.) |
+| `properties` | object | Non-standard extras under the standard `properties` bag: `seed`, `frequency` (ms), `generator`, `timezone` (the `tz` in force), `placement` (`indoor`/`outdoor`). (Phase 2: CDT display hints will land here — see §9.) |
+| `Thing` | entity | The site hosting the sensor: `properties` carries `placement`, `latitude`, `longitude`, `timezone`, and `Locations[]` holds one GeoJSON `Point`. |
 | `Sensor` | entity | The generating procedure. `encodingType`/`metadata` follow STA; `metadata` is the repo URL. |
 | `ObservedProperty` | entity | `name` + `definition` (phenomenon IRI). Good source for a series label. |
+| `FeatureOfInterest` | entity | What is being observed — the air at the site, as GeoJSON. STA hangs this off each Observation; it is carried once here because every observation in a series shares one site. |
 | `Observations@iot.count` | number | Number of embedded observations. |
 | `Observations[]` | array | Each: `@iot.id`, `phenomenonTime` (ISO), `resultTime` (ISO), `result`. |
 | `result` | number \| boolean \| string | Typed per `observationType` (§7). |
 | `*@iot.navigationLink` | string | Where the related entity/collection lives. `Observations@iot.navigationLink` resolves to the real `?format=dataArray` endpoint. |
 
-> **Not included:** `Thing`, `Location`, `FeatureOfInterest`, `HistoricalLocation`.
-> Those describe *deployment and geography*, which this synthetic per-type API does
-> not own. CDT supplies them from its own `Sensor` record (`latitude`/`longitude`/
-> `elevation`) and attaches this Datastream to its own Thing.
+> **Whose geography is this?** The `Thing`, `Location`, `FeatureOfInterest` and
+> `observedArea` describe the **generation site** — the `?lat=`/`?lon=` the series
+> was computed for, which is what makes the values physically meaningful. They are
+> not a claim about *your* deployment. CDT should keep supplying deployment
+> geography from its own `Sensor` record (`latitude`/`longitude`/`elevation`) and
+> attaching this Datastream to its own Thing; the sensible pattern is to pass those
+> same coordinates in as `?lat=`/`?lon=` so the two agree.
+>
+> `HistoricalLocation` is not emitted: a synthetic site does not move.
 
 ## 4. `format=dataArray` — compact observations
 
@@ -163,16 +216,27 @@ to `tz`; `value` is `parseFloat`-able for every kind (`state` → ordinal index)
 10:35:00,23.68
 ```
 
-**reading** — one current value:
+**reading** — one current value, with the site it was generated for and the
+effective range it used:
 
 ```jsonc
 { "type": "temperature", "unit": "°C", "seed": 0, "timezone": "EDT",
-  "timestamp": "2026-07-24T06:55:17.465-04:00", "value": 26.61, "min": 15, "max": 30 }
+  "timestamp": "2026-07-24T06:55:17.465-04:00",
+  "location": { "latitude": 45, "longitude": -75 }, "placement": "outdoor",
+  "value": 26.61, "min": 12.9, "max": 34.7 }
 ```
+
+`min`/`max` are the band **this request** used, not a fixed per-type range: they
+follow the season, the site and `placement` unless you override them.
 
 ## 6. Sensor types
 
-| Type | Unit | Default range | Frequency | Kind |
+Ranges below are **nominal** — the typical band for a type, and what
+`GET /api/sensors` advertises. A request's effective range follows the site, the
+season and `placement` (an outdoor thermometer in January is below zero), or your
+own `min`/`max`; `format=reading` reports the band it used.
+
+| Type | Unit | Nominal range | Frequency | Kind |
 |------|------|---------------|-----------|------|
 | `temperature` | °C | 15 – 30 | 5 min | continuous |
 | `light` | lux | 0 – 100000 | 5 min | continuous |
@@ -257,11 +321,23 @@ the stored `SensorType.unitOfMeasurement.symbol` when a payload carries no unit
 
 ## 10. Determinism
 
-Values come from a `mulberry32` PRNG seeded from `(seed, type, time bucket)` plus a
-diurnal shape, a per-seed profile (swing, level, peak timing, noisiness), four
-noise octaves (day / 3 h / 20 min / 15 s) and sparse events. The same
-`type + seed + timestamp + params` always yields the same value; time-of-day is
-evaluated at the fixed offset of `tz` (**EDT** by default), never in the server's
-zone. So `?at=` fixed URLs are reproducible in tests, while "now" URLs fluctuate
-gently between polls. `tz` is part of the input: the same URL with a different
-`tz` is a different (but equally reproducible) series.
+Each value is a physical rule evaluated for the site and the instant — solar
+position and clear-sky irradiance from the NOAA equations, a seasonal climatology
+from latitude, a seeded weather series, and (indoors) a setpoint and an occupancy
+schedule — then reshaped by a per-seed profile (swing, level, peak timing,
+noisiness), four noise octaves (day / 3 h / 20 min / 15 s) and sparse events, all
+from a `mulberry32` PRNG seeded from `(seed, type, time bucket)`.
+
+The same `type + seed + timestamp + params` always yields the same value. Local
+time is read at the fixed offset of `tz` (**EDT** by default), never in the
+server's zone, and nothing else reads a clock, so `?at=` URLs are reproducible in
+tests while "now" URLs fluctuate gently between polls. `tz`, `lat`, `lon` and
+`placement` are all part of the input: change any of them and you get a different
+but equally reproducible series.
+
+One consequence worth knowing: with `lat`/`lon` pinned, changing only `tz` does
+**not** move an outdoor solar or thermal curve — relabelling a clock does not move
+the sun. It does shift everything on a schedule (occupancy, CO₂, lighting, water,
+noise) and every rendered timestamp. Changing `tz` *without* a `lon` also moves
+the default site to that zone's central meridian, which is why `?tz=PDT` alone
+still reads like a west-coast sensor.

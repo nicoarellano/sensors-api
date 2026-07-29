@@ -1,8 +1,11 @@
 // Shared types for the synthetic sensor API.
 
+import type { Climate, SunState } from "@/lib/solar";
+
 /**
  * How a sensor's value is produced:
- * - `continuous`: a smooth diurnal curve scaled into the effective [min, max] range.
+ * - `continuous`: a physical value from the sensor's rule, normalized into the
+ *   effective [min, max] range before noise and events are layered on.
  * - `binary`: a 0/1 occupancy-style event (min/max are ignored).
  * - `enum`: a discrete label drawn from `values` (min/max are ignored).
  *
@@ -11,6 +14,80 @@
  * enum -> OM_CategoryObservation.
  */
 export type SensorKind = "continuous" | "binary" | "enum";
+
+/**
+ * Where the sensor sits. `outdoor` is exposed to the real sky and the real
+ * seasonal air temperature; `indoor` sits behind glazing and a control system,
+ * so it is damped, lagged and held near a setpoint.
+ */
+export type Placement = "indoor" | "outdoor";
+
+/** An inclusive value range in the sensor's own unit. */
+export interface Range {
+  min: number;
+  max: number;
+}
+
+/**
+ * Everything about the site and the instant that no individual sensor changes.
+ * Shared by every rule so that sensors at the same seed and site agree with each
+ * other: the same clouds dim the light sensor and flatten the temperature curve.
+ */
+export interface SiteContext {
+  /** Local hour of day in [0, 24) as a float. */
+  hour: number;
+  /** Local day of year, 1..366 — the season. */
+  dayOfYear: number;
+  /** True on Saturday or Sunday, local. */
+  isWeekend: boolean;
+  /** Degrees north (negative south). */
+  latitude: number;
+  /** Degrees east of Greenwich (negative in the Americas). */
+  longitude: number;
+  /** Fixed offset of the requested zone from UTC, in minutes. */
+  offsetMinutes: number;
+  placement: Placement;
+  /** The absolute instant, for models that need continuity across midnight. */
+  at: Date;
+  /** Seed of this series, for weather and other site-level seeded terms. */
+  seed: number;
+  sun: SunState;
+  /** Fractional cloud cover in [0, 1]. */
+  cloud: number;
+  climate: Climate;
+}
+
+/** A site context plus the outdoor air temperature several rules are driven by. */
+export interface ShapeContext extends SiteContext {
+  /** Outdoor dry-bulb air temperature in °C at this instant. */
+  outdoorC: number;
+}
+
+/**
+ * How one sensor turns a context into a value. Exactly one branch applies per
+ * `SensorKind`; see `lib/realism.ts` for the rules and the physics behind them.
+ */
+export interface SensorRule {
+  /**
+   * Continuous only. The effective range for this context, used when the caller
+   * supplies no `min`/`max`. Context-dependent because an honest outdoor
+   * thermometer cannot report 15–30 °C in January. Falls back to the entry's
+   * nominal `min`/`max` when omitted.
+   */
+  range?: (ctx: ShapeContext) => Range;
+  /** Continuous only. The physical value in the sensor's unit at this instant. */
+  value?: (ctx: ShapeContext) => number;
+  /**
+   * Continuous only. Suppress the per-seed peak-timing jitter. Set it for
+   * sensors whose timing is fixed by astronomy — moving a solar peak off solar
+   * noon is not a personality, it is an error.
+   */
+  solarLocked?: boolean;
+  /** Binary only. Probability in [0, 1] that the event reads true. */
+  prob?: (ctx: ShapeContext) => number;
+  /** Enum only. Relative weights in the same order as `values`; any positive scale. */
+  weights?: (ctx: ShapeContext) => number[];
+}
 
 /** OGC SensorThings Datastream.unitOfMeasurement (null trio for unitless sensors). */
 export interface UnitOfMeasurement {
@@ -30,9 +107,14 @@ export interface ObservedProperty {
 export interface SensorConfig {
   /** Short unit label, e.g. "°C", "lux", "ppm". */
   unit: string;
-  /** Default lower bound of the natural range. */
+  /**
+   * Nominal lower bound: what this sensor typically reads, advertised by
+   * `GET /api/sensors`. The *effective* range of a request comes from
+   * `rule.range` when the sensor has one (an outdoor thermometer's range moves
+   * with the season), and from a caller's `min`/`max` above everything.
+   */
   min: number;
-  /** Default upper bound of the natural range. */
+  /** Nominal upper bound. See `min`. */
   max: number;
   kind: SensorKind;
   /**
@@ -55,25 +137,10 @@ export interface SensorConfig {
    * phenomenon is physically smooth (temperature, pressure, daylight).
    */
   eventRate?: number;
-  /**
-   * Continuous kinds only. Baseline shape as a function of hour-of-day
-   * (0..24), returning a normalized value in [0, 1]. Because it is
-   * normalized, the shape stretches into whatever effective range is in
-   * force (default or user-supplied min/max) instead of clipping.
-   */
-  shape?: (hour: number) => number;
-  /**
-   * Binary kind only. Probability in [0, 1] that the event is "on" at a
-   * given hour-of-day.
-   */
-  prob?: (hour: number) => number;
   /** Enum kind only. The discrete labels this sensor can emit. */
   values?: string[];
-  /**
-   * Enum kind only. Relative weights (same length/order as `values`) as a
-   * function of hour-of-day. Need not sum to 1.
-   */
-  weights?: (hour: number) => number[];
+  /** How this sensor responds to time, season, site and placement. */
+  rule: SensorRule;
 }
 
 /**
@@ -100,6 +167,10 @@ export interface Reading {
   timestamp: string;
   /** Timezone the timestamp and the diurnal curve are expressed in. */
   timezone: string;
+  /** Site the value was generated for: what the sun and the season were doing. */
+  location: { latitude: number; longitude: number };
+  /** Exposed to the sky, or inside a conditioned space. */
+  placement: Placement;
   value: number | string;
   /** Present for continuous sensors only (effective range). */
   min?: number;
@@ -136,6 +207,12 @@ export interface SensorParams {
   timezone: string;
   /** Fixed offset of `timezone` from UTC in minutes (EDT = -240). */
   offsetMinutes: number;
+  /** Site latitude in degrees north; sets day length and the seasonal climate. */
+  latitude: number;
+  /** Site longitude in degrees east; sets where solar noon falls on the clock. */
+  longitude: number;
+  /** Whether the sensor is exposed to the sky or sits inside a conditioned space. */
+  placement: Placement;
   /** Number of points to return (points-based window). */
   points?: number;
   /** Total span in milliseconds (duration-based window); overrides `points`. */

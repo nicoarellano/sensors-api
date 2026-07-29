@@ -22,6 +22,68 @@ describe("parseParams — defaults", () => {
     expect(r.value.min).toBeUndefined();
     expect(r.value.max).toBeUndefined();
   });
+
+  it("defaults to the reference site, exposed to the sky", () => {
+    const r = parse("");
+    expect(r.ok && r.value.latitude).toBe(45);
+    expect(r.ok && r.value.longitude).toBe(-75);
+    expect(r.ok && r.value.placement).toBe("outdoor");
+  });
+});
+
+describe("parseParams — lat / lon", () => {
+  it("parses a site, with aliases", () => {
+    const r = parse("lat=48.86&lon=2.35");
+    expect(r.ok && r.value.latitude).toBe(48.86);
+    expect(r.ok && r.value.longitude).toBe(2.35);
+    expect(parse("latitude=-33.87").ok && (parse("latitude=-33.87") as { value: { latitude: number } }).value.latitude).toBe(-33.87);
+    expect(parse("lng=151.21").ok && (parse("lng=151.21") as { value: { longitude: number } }).value.longitude).toBe(151.21);
+  });
+
+  it("rejects out-of-range or non-numeric coordinates", () => {
+    expect(parse("lat=91").ok).toBe(false);
+    expect(parse("lat=-91").ok).toBe(false);
+    expect(parse("lat=north").ok).toBe(false);
+    expect(parse("lon=181").ok).toBe(false);
+    expect(parse("lon=-181").ok).toBe(false);
+    expect(parse("lon=west").ok).toBe(false);
+  });
+
+  it("accepts the poles and the antimeridian", () => {
+    expect(parse("lat=90&lon=180").ok).toBe(true);
+    expect(parse("lat=-90&lon=-180").ok).toBe(true);
+  });
+
+  it("falls back to a zone's central meridian when only tz is given", () => {
+    // Without a longitude, a JST series would otherwise be lit at midnight.
+    const jst = parse("tz=JST");
+    expect(jst.ok && jst.value.longitude).toBe(135);
+    const pst = parse("tz=PST");
+    expect(pst.ok && pst.value.longitude).toBe(-120);
+    // The reference site stands in for its own zone.
+    expect(parse("tz=EDT").ok && (parse("tz=EDT") as { value: { longitude: number } }).value.longitude).toBe(-75);
+  });
+
+  it("prefers an explicit longitude over the meridian fallback", () => {
+    const r = parse("tz=JST&lon=139.69&lat=35.69");
+    expect(r.ok && r.value.longitude).toBe(139.69);
+    expect(r.ok && r.value.latitude).toBe(35.69);
+  });
+});
+
+describe("parseParams — placement", () => {
+  it("accepts indoor and outdoor in any case", () => {
+    expect(parse("placement=indoor").ok && (parse("placement=indoor") as { value: { placement: string } }).value.placement).toBe("indoor");
+    expect(parse("placement=OUTDOOR").ok && (parse("placement=OUTDOOR") as { value: { placement: string } }).value.placement).toBe("outdoor");
+    expect(parse("placement=Indoor").ok && (parse("placement=Indoor") as { value: { placement: string } }).value.placement).toBe("indoor");
+  });
+
+  it("rejects anything else with a message naming the two options", () => {
+    const r = parse("placement=roof");
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toContain("indoor");
+    expect(!r.ok && r.error).toContain("outdoor");
+  });
 });
 
 describe("parseParams — seed / min / max / at", () => {

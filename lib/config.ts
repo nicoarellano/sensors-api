@@ -106,8 +106,8 @@ export const SENSORS = {
   },
   energy_consumption: {
     unit: "W",
-    min: 100,
-    max: 3000,
+    min: 0,
+    max: 2320,
     kind: "continuous",
     frequency: 60000, // 1 min
     unitOfMeasurement: {
@@ -119,9 +119,10 @@ export const SENSORS = {
       name: "Power",
       definition: "https://dbpedia.org/page/Electric_power",
     },
-    noise: 0.08,
+    noise: 0.05,
     // Appliances and plant switching on and off through the day.
     eventRate: 5,
+    eventAmplitude: 0.06,
     rule: energyRule,
   },
   movement: {
@@ -212,6 +213,7 @@ export const SENSORS = {
     noise: 0.04,
     // Draw-offs: a tap or valve opening for a few minutes.
     eventRate: 8,
+    eventAmplitude: 0.14,
     rule: flowRule,
   },
   state: {

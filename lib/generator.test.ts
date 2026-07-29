@@ -253,6 +253,58 @@ function mean(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) / values.length;
 }
 
+/** A point tagged with the local clock hour it falls on, as a float. */
+interface HourlyPoint {
+  hour: number;
+  value: number;
+}
+
+/**
+ * A day of continuous samples tagged with their *local* hour. The zone matters
+ * for anything read against the sun: at longitude -75 a UTC-labelled series puts
+ * sunset just past midnight, so hour windows written in UTC read backwards.
+ */
+function localDay(
+  type: Parameters<typeof generateWindow>[0],
+  seed: number,
+  overrides: Partial<SensorParams>,
+): HourlyPoint[] {
+  const offsetMinutes = overrides.offsetMinutes ?? 0;
+  return daySeries(type, seed, overrides).map((p) => {
+    const local = new Date(p.at.getTime() + offsetMinutes * 60000);
+    return {
+      hour: local.getUTCHours() + local.getUTCMinutes() / 60,
+      value: p.value as number,
+    };
+  });
+}
+
+const EDT: Partial<SensorParams> = { timezone: "EDT", offsetMinutes: -240 };
+const EST: Partial<SensorParams> = { timezone: "EST", offsetMinutes: -300 };
+
+/** An exterior July day in Ottawa, by local hour. */
+function summerDay(seed: number): HourlyPoint[] {
+  return localDay("energy_consumption", seed, { ...EDT, placement: "outdoor" });
+}
+
+/** The same meter in January, by local hour. */
+function winterDay(seed: number): HourlyPoint[] {
+  return localDay("energy_consumption", seed, {
+    ...EST,
+    placement: "outdoor",
+    at: new Date("2026-01-15T23:59:00Z"),
+  });
+}
+
+/** Mean of the points whose local hour falls in [from, to), wrapping midnight. */
+function meanAt(points: HourlyPoint[], from: number, to: number): number {
+  return mean(
+    points
+      .filter((p) => (from <= to ? p.hour >= from && p.hour < to : p.hour >= from || p.hour < to))
+      .map((p) => p.value),
+  );
+}
+
 describe("seed separation — different seeds read as different sensors", () => {
   const SEEDS = [1, 2, 3, 4, 5];
   const INDOOR: Partial<SensorParams> = { placement: "indoor" };
@@ -422,12 +474,42 @@ describe("placement — indoor is damped, outdoor is exposed", () => {
     expect(indoor).toBeGreaterThan(100);
   });
 
-  it("inverts the energy day: an exterior meter peaks at night, an indoor one by day", () => {
+  it("gives an indoor meter an occupied day and an exterior meter a weather-led one", () => {
     const indoor = daySeries("energy_consumption", 5, { placement: "indoor" });
-    const outdoor = daySeries("energy_consumption", 5, { placement: "outdoor" });
     expect(meanBetween(indoor, 8, 20)).toBeGreaterThan(meanBetween(indoor, 22, 4));
-    // Dusk-to-dawn lighting: the exterior load is a night load.
-    expect(meanBetween(outdoor, 22, 4)).toBeGreaterThan(meanBetween(outdoor, 8, 20));
+
+    // Outdoors the day follows the weather, not the office: in July the
+    // afternoon is rejecting heat, in January the night is lighting plus trace
+    // heating and the mild part of the afternoon is the cheapest hour of the day.
+    const july = summerDay(5);
+    expect(meanAt(july, 13, 19)).toBeGreaterThan(meanAt(july, 1, 5));
+    const january = winterDay(5);
+    expect(meanAt(january, 22, 4)).toBeGreaterThan(meanAt(january, 13, 16));
+  });
+
+  it("never flatlines an exterior meter across a summer day", () => {
+    // Regression: the exterior rule used to be a two-state square wave, so the
+    // whole of a July day was one standing load plus noise — the user-visible
+    // symptom was five sensors all reading a flat ~170 W from dawn to dusk.
+    const daytime = summerDay(5)
+      .filter((p) => p.hour >= 7 && p.hour <= 20)
+      .map((p) => p.value);
+    expect(Math.max(...daytime) / Math.min(...daytime)).toBeGreaterThan(2);
+  });
+
+  it("switches exterior lighting at the same time for every seed", () => {
+    // Regression: energy was not solar-locked, so the per-seed phase shift moved
+    // the dusk-to-dawn cliff by up to three hours between seeds.
+    const duskRise = (seed: number): number => {
+      const evening = summerDay(seed).filter((p) => p.hour >= 18 && p.hour <= 23.5);
+      const values = evening.map((p) => p.value);
+      const half = (Math.min(...values) + Math.max(...values)) / 2;
+      // Local hour the evening rise passes halfway up.
+      return evening.find((p) => p.value > half)?.hour ?? -1;
+    };
+    const hours = [1, 2, 3, 4, 5].map(duskRise);
+    expect(Math.min(...hours)).toBeGreaterThan(19);
+    expect(Math.max(...hours) - Math.min(...hours)).toBeLessThan(0.75);
   });
 
   it("dries the air out indoors in winter, the way a heated room does", () => {
@@ -534,17 +616,27 @@ describe("generateWindow — flow behavior preserved", () => {
     expect(v.filter((x) => x < 0.6).length).toBeGreaterThan(v.length / 3);
   });
 
-  it("outdoor flow is irrigation: a pre-dawn burst in summer, nothing in winter", () => {
-    const summer = generateWindow(
-      "flow",
-      params({ seed: 7, at: new Date("2026-07-27T23:59:00Z"), windowMs: 24 * 3600 * 1000 }),
-    );
-    const winter = generateWindow(
-      "flow",
-      params({ seed: 7, at: new Date("2026-01-15T23:59:00Z"), windowMs: 24 * 3600 * 1000 }),
-    );
-    expect(Math.max(...summer.map((p) => p.value as number))).toBeGreaterThan(2);
-    // A frozen line does not irrigate.
-    expect(Math.max(...winter.map((p) => p.value as number))).toBeLessThan(0.5);
+  it("outdoor flow runs irrigation cycles and never stalls at a flat zero", () => {
+    // Regression: the rule had only a pre-dawn irrigation burst, so any window
+    // outside roughly 03:00–08:00 read a solid 0.00 — including every daytime
+    // preview and every live tile.
+    const summer = localDay("flow", 7, { ...EDT, placement: "outdoor" });
+    expect(Math.max(...summer.map((p) => p.value))).toBeGreaterThan(4);
+    // Two controller cycles, before dawn and after dusk.
+    expect(meanAt(summer, 4, 6)).toBeGreaterThan(meanAt(summer, 8, 10));
+    expect(meanAt(summer, 20, 22)).toBeGreaterThan(meanAt(summer, 16, 18));
+    // Make-up water and hose draw keep the working day off the floor.
+    expect(meanAt(summer, 10, 18)).toBeGreaterThan(0.3);
+  });
+
+  it("outdoor flow reads a hard zero once the line would freeze", () => {
+    const winter = localDay("flow", 7, {
+      ...EST,
+      placement: "outdoor",
+      at: new Date("2026-01-15T23:59:00Z"),
+    });
+    // A drained irrigation main in January is not "nearly zero", it is zero:
+    // no jitter, and no phantom draw-offs either.
+    expect(Math.max(...winter.map((p) => p.value))).toBe(0);
   });
 });

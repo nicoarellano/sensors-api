@@ -323,11 +323,71 @@ function darkness(ctx: SiteContext): number {
   return 1 - ctx.sun.twilight;
 }
 
+/**
+ * Local hours across which the exterior lighting's late-night trim comes in and
+ * goes back out. The trim has to be over well before dusk, or restoring full
+ * output lands just before dawn and puts a spike on the end of the night, so it
+ * releases across the afternoon — where, at any latitude that has a dawn, the
+ * lights are already off and it cannot be seen.
+ */
+const DIM_START_HOUR = 1;
+const DIM_RELEASE_HOUR = 15;
+/** Fraction of full output the lighting is trimmed back to through the small hours. */
+const LATE_NIGHT_DIM = 0.55;
+
+/**
+ * Exterior lighting output in [0, 1]: photocell dusk-to-dawn, trimmed back
+ * through the small hours the way a real site controller does once the last car
+ * has gone. Multiplied by `darkness`, so it is 0 whenever the sky is lit.
+ */
+export function exteriorLighting(ctx: SiteContext): number {
+  const trim = clamp01(
+    Math.min(ramp(ctx.hour, DIM_START_HOUR, 1), 1 - ramp(ctx.hour, DIM_RELEASE_HOUR, 5)),
+  );
+  return darkness(ctx) * (1 - (1 - LATE_NIGHT_DIM) * trim);
+}
+
+/** Outdoor air temperature, relative to the setpoint, at which heat rejection starts. */
+const HEAT_REJECTION_LEAD_C = 6;
+/** Further warming, in °C, that saturates the heat-rejection plant. */
+const HEAT_REJECTION_SPAN_C = 14;
+
+/**
+ * How hard outdoor heat-rejection plant (condensers, dry coolers, a cooling
+ * tower) is working, in [0, 1]. It starts below the setpoint — solar gain and
+ * internal loads mean a building is rejecting heat well before the air is warmer
+ * than the room — and saturates on a hot afternoon.
+ */
+export function heatRejection(ctx: ShapeContext): number {
+  const onsetC = setpointC(ctx) - HEAT_REJECTION_LEAD_C;
+  return clamp01((ctx.outdoorC - onsetC) / HEAT_REJECTION_SPAN_C);
+}
+
+/** Air temperature freeze protection starts at, and the span that saturates it. */
+const FREEZE_ONSET_C = 2;
+const FREEZE_SPAN_C = 8;
+
+/** How hard freeze protection (trace heating, pipe and gutter heaters) is working. */
+export function freezeProtection(ctx: ShapeContext): number {
+  return clamp01((FREEZE_ONSET_C - ctx.outdoorC) / FREEZE_SPAN_C);
+}
+
+/**
+ * Warmest and coldest the outdoor air gets on this day, including room for a
+ * warm or cold spell. Used to size ranges that depend on how hard the weather
+ * will drive the plant today, without evaluating every hour of the day.
+ */
+function dailyExtremes(ctx: ShapeContext): { minC: number; maxC: number } {
+  const { meanC, diurnalRangeC } = ctx.climate;
+  const margin = diurnalRangeC / 2 + WEATHER_ANOMALY_C;
+  return { minC: meanC - margin, maxC: meanC + margin };
+}
+
 /** Duty cycle of the plant this `state` sensor is attached to, in [0, 1]. */
 function dutyCycle(ctx: ShapeContext): number {
   return ctx.placement === "indoor"
     ? Math.max(occupancy(ctx), hvacDemand(ctx))
-    : Math.max(darkness(ctx), clamp01((2 - ctx.outdoorC) / 8));
+    : Math.max(darkness(ctx), freezeProtection(ctx), heatRejection(ctx));
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +446,7 @@ export const humidityRule: SensorRule = {
  */
 export const lightRule: SensorRule = {
   solarLocked: true,
+  restsAtZero: true,
   value: (ctx) =>
     ctx.placement === "indoor" ? indoorIlluminance(ctx) : outdoorIlluminance(ctx),
   range: (ctx) => byPlacement(ctx, { min: 0, max: 2200 }, { min: 0, max: 100000 }),
@@ -398,6 +459,7 @@ const INTERIOR_SURFACE_FRACTION = 0.3;
 /** Irradiance is the same astronomy as light, measured in W/m² instead of lux. */
 export const irradianceRule: SensorRule = {
   solarLocked: true,
+  restsAtZero: true,
   value: (ctx) =>
     groundIrradiance(ctx) *
     (ctx.placement === "indoor"
@@ -459,24 +521,38 @@ const BASE_LOAD_W = 220;
 const PLUG_LOAD_W = 700;
 const LIGHTING_LOAD_W = 300;
 const HVAC_LOAD_W = 1100;
-/** Exterior loads in W: standing load, dusk-to-dawn lighting, freeze protection. */
-const EXTERIOR_BASE_W = 120;
-const EXTERIOR_LIGHTING_W = 520;
-const FREEZE_PROTECTION_W = 900;
+
+/** Exterior loads in W, each at full output. */
+const EXTERIOR_STANDING_W = 90; // controls, comms, signage: never off
+const EXTERIOR_LIGHTING_W = 480; // dusk-to-dawn lighting
+const EXTERIOR_ACTIVITY_W = 420; // pumps, fans, doors, vehicle charging
+const HEAT_REJECTION_W = 900; // condensers and dry coolers
+const FREEZE_PROTECTION_W = 900; // trace heating and gutter heaters
 
 /**
  * Indoor demand is occupancy plus weather: plug load and lighting follow the
- * people, HVAC follows how far outdoors is from the setpoint. An exterior meter
- * inverts the day — it is the dusk-to-dawn lighting and the freeze protection,
- * so it peaks at night and in the cold.
+ * people, HVAC follows how far outdoors is from the setpoint.
+ *
+ * An exterior meter is the same site seen from the outside: a standing load that
+ * never stops, dusk-to-dawn lighting that dims through the small hours, plant
+ * that follows site activity, and whichever of heat rejection or freeze
+ * protection the weather is calling for. So it peaks on a hot afternoon in July
+ * and overnight in January, and it is never flat — the old version was a
+ * two-state square wave that read exactly 120 W for the whole of a summer day.
  */
 export const energyRule: SensorRule = {
+  // Outdoors the shape is a photocell's, and a photocell does not switch an hour
+  // late because of a seed. Indoors it follows a schedule, which may shift.
+  solarLocked: (placement) => placement === "outdoor",
+  restsAtZero: true,
   value: (ctx) => {
     if (ctx.placement === "outdoor") {
       return (
-        EXTERIOR_BASE_W +
-        EXTERIOR_LIGHTING_W * darkness(ctx) +
-        FREEZE_PROTECTION_W * clamp01((2 - ctx.outdoorC) / 8)
+        EXTERIOR_STANDING_W +
+        EXTERIOR_LIGHTING_W * exteriorLighting(ctx) +
+        EXTERIOR_ACTIVITY_W * traffic(ctx) +
+        HEAT_REJECTION_W * heatRejection(ctx) +
+        FREEZE_PROTECTION_W * freezeProtection(ctx)
       );
     }
     return (
@@ -486,7 +562,31 @@ export const energyRule: SensorRule = {
       HVAC_LOAD_W * hvacDemand(ctx)
     );
   },
-  range: (ctx) => byPlacement(ctx, { min: 150, max: 3200 }, { min: 80, max: 1700 }),
+  // A meter reads from zero up, and the top of the band is what today's weather
+  // can actually call for. Sizing the outdoor band on the January peak would
+  // leave a July series bunched into the bottom of its own range, where the
+  // noise term dwarfs the signal.
+  range: (ctx) => {
+    if (ctx.placement === "indoor") {
+      return { min: 0, max: BASE_LOAD_W + PLUG_LOAD_W + LIGHTING_LOAD_W + HVAC_LOAD_W };
+    }
+    const { minC, maxC } = dailyExtremes(ctx);
+    const onsetC = setpointC(ctx) - HEAT_REJECTION_LEAD_C;
+    const cooling = HEAT_REJECTION_W * clamp01((maxC - onsetC) / HEAT_REJECTION_SPAN_C);
+    const freezing = FREEZE_PROTECTION_W * clamp01((FREEZE_ONSET_C - minC) / FREEZE_SPAN_C);
+    // Everything but heating-vs-cooling can coincide: in January the evening
+    // commute peak lands after dusk, with the lighting and the trace heating
+    // already on. Only one of the two weather loads can run at a time.
+    return {
+      min: 0,
+      max: Math.round(
+        EXTERIOR_STANDING_W +
+          EXTERIOR_LIGHTING_W +
+          EXTERIOR_ACTIVITY_W +
+          Math.max(cooling, freezing),
+      ),
+    };
+  },
 };
 
 /** Occupancy detection indoors, pedestrians and vehicles outdoors. */
@@ -515,21 +615,49 @@ export const stateRule: SensorRule = {
   },
 };
 
-/** Domestic draw in L/min at full occupancy, and peak irrigation flow. */
+/** Domestic draw in L/min at full occupancy. */
 const DOMESTIC_FLOW_LPM = 3.2;
-const IRRIGATION_FLOW_LPM = 8;
+/** Peak flow of an irrigation cycle, in L/min. */
+const IRRIGATION_FLOW_LPM = 7.5;
+/** Local hours the irrigation controller runs, and the width of a cycle. */
+const IRRIGATION_MORNING_HOUR = 4.6;
+const IRRIGATION_EVENING_HOUR = 20.4;
+const IRRIGATION_WIDTH_H = 1.1;
+/** Share of the morning volume the shorter evening cycle puts down. */
+const EVENING_IRRIGATION_SHARE = 0.7;
+/** Cooling-tower and evaporative make-up at full heat rejection, in L/min. */
+const MAKEUP_FLOW_LPM = 2.4;
+/** Hose, washdown and misc. site draw at full activity, in L/min. */
+const HOSE_FLOW_LPM = 0.9;
 
 /**
  * Indoors this is domestic water: nothing overnight, morning and end-of-day
- * peaks around a working day. Outdoors it is irrigation — a burst before dawn
- * in the growing season, and nothing at all once the line would freeze.
+ * peaks around a working day.
+ *
+ * Outdoors it is the site's water: irrigation cycles before dawn and after
+ * dusk in the growing season, evaporative make-up while the plant is rejecting
+ * heat, and hose and washdown draw through an active day. It goes to a hard zero
+ * once the line would freeze, which is real — a drained irrigation main in
+ * January reads exactly nothing. The previous version had only the pre-dawn
+ * cycle, so it read a solid 0.00 for twenty hours out of twenty-four.
  */
 export const flowRule: SensorRule = {
+  restsAtZero: true,
   value: (ctx) => {
     if (ctx.placement === "outdoor") {
-      const season = clamp01((ctx.climate.summerness - 0.35) / 0.4);
+      // Below +1 °C the line is drained; above +5 °C it runs normally.
       const unfrozen = clamp01((ctx.outdoorC - 1) / 4);
-      return IRRIGATION_FLOW_LPM * season * unfrozen * bump(ctx.hour, 5.2, 0.9);
+      const season = clamp01((ctx.climate.summerness - 0.35) / 0.4);
+      const cycles =
+        bump(ctx.hour, IRRIGATION_MORNING_HOUR, IRRIGATION_WIDTH_H) +
+        EVENING_IRRIGATION_SHARE *
+          bump(ctx.hour, IRRIGATION_EVENING_HOUR, IRRIGATION_WIDTH_H);
+      return (
+        unfrozen *
+        (IRRIGATION_FLOW_LPM * season * cycles +
+          MAKEUP_FLOW_LPM * heatRejection(ctx) +
+          HOSE_FLOW_LPM * traffic(ctx))
+      );
     }
     const peaks = 0.7 + 0.6 * bump(ctx.hour, 8.5, 1.2) + 0.5 * bump(ctx.hour, 17.5, 1.5);
     return DOMESTIC_FLOW_LPM * occupancy(ctx) * peaks;

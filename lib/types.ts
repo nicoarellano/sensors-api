@@ -80,9 +80,19 @@ export interface SensorRule {
   /**
    * Continuous only. Suppress the per-seed peak-timing jitter. Set it for
    * sensors whose timing is fixed by astronomy — moving a solar peak off solar
-   * noon is not a personality, it is an error.
+   * noon is not a personality, it is an error, and neither is a photocell that
+   * switches an hour after sunrise. A predicate covers rules that are astronomy
+   * in one placement and a schedule in the other.
    */
-  solarLocked?: boolean;
+  solarLocked?: boolean | ((placement: Placement) => boolean);
+  /**
+   * Continuous only. This sensor genuinely rests at zero (dark, closed, off, no
+   * flow), so its floor is real: it is never lifted off the bottom of its range,
+   * it takes no per-seed baseline shift, and its fluctuation scales with the
+   * signal instead of with the range. Without it a meter reading a 120 W
+   * standing load out of a 1700 W range picks up ±87 W of noise.
+   */
+  restsAtZero?: boolean;
   /** Binary only. Probability in [0, 1] that the event reads true. */
   prob?: (ctx: ShapeContext) => number;
   /** Enum only. Relative weights in the same order as `values`; any positive scale. */
@@ -137,6 +147,13 @@ export interface SensorConfig {
    * phenomenon is physically smooth (temperature, pressure, daylight).
    */
   eventRate?: number;
+  /**
+   * Peak burst amplitude in normalized units, for sensors with an `eventRate`.
+   * Separate from `noise` because a draw-off is not a louder version of sensor
+   * jitter: a tap opening on an idle line is a large absolute step, while the
+   * same meter's resting jitter is tiny. Defaults to `noise`.
+   */
+  eventAmplitude?: number;
   /** Enum kind only. The discrete labels this sensor can emit. */
   values?: string[];
   /** How this sensor responds to time, season, site and placement. */

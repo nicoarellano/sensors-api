@@ -13,7 +13,7 @@
 // than the same line drawn twice:
 //   - profile: a fixed per-(seed, type) personality — swing amplitude, baseline
 //     level, peak timing and noisiness. This is what separates the curves by day.
-//   - noise:   four cosine-interpolated octaves (day, 3h, 20min, 30s) so the
+//   - noise:   four cosine-interpolated octaves (day, 3h, 20min, 15s) so the
 //     series drifts day to day, wanders within the day, and still jitters
 //     per reading.
 //   - events:  sparse Gaussian bursts for sensors where spikes are physical
@@ -80,6 +80,13 @@ function clamp(x: number, lo: number, hi: number): number {
 
 /** Width of the soft-saturation knee at each end of the normalized range. */
 const KNEE = 0.12;
+
+/**
+ * Share of a burst's amplitude that survives at the sensor's floor. Noise fades
+ * out with the signal; a burst does not, or a tap opening on an idle water line
+ * would be invisible.
+ */
+const EVENT_FLOOR = 0.4;
 
 /**
  * Fold a normalized value into [0, 1] with a soft knee instead of a hard cut, so
@@ -166,7 +173,7 @@ function eventBoost(
   offsetMinutes: number,
 ): number {
   const rate = configOf(type).eventRate;
-  if (!rate) return 0;
+  if (!rate || amplitudeUnit <= 0) return 0;
 
   const typeHash = hashString(type);
   const t = at.getTime() + offsetMinutes * 60000;
@@ -227,8 +234,10 @@ function shapeContextFor(
   params: SensorParams,
   at: Date,
 ): ShapeContext {
-  const cfg = configOf(type);
-  if (cfg.rule.solarLocked) return shapeContext(params, at);
+  const { solarLocked } = configOf(type).rule;
+  const locked =
+    typeof solarLocked === "function" ? solarLocked(params.placement) : solarLocked;
+  if (locked) return shapeContext(params, at);
   const profile = sensorProfile(type, params.seed);
   return shapeContext(params, new Date(at.getTime() - profile.phaseHours * HOUR_MS));
 }
@@ -279,9 +288,9 @@ export function computeValue(
   const physical = cfg.rule.value ? cfg.rule.value(ctx) : (natural.min + natural.max) / 2;
   const base = clamp((physical - natural.min) / span, 0, 1);
 
-  // A rule whose range bottoms out at zero is one that genuinely rests at zero
-  // (dark, closed, off), so it must be allowed to sit exactly there.
-  const quiet = natural.min === 0;
+  // Sensors that declare `restsAtZero` genuinely rest at their floor (dark,
+  // closed, off, no flow), so it must be allowed to sit exactly there.
+  const quiet = cfg.rule.restsAtZero === true;
 
   // Personality: each seed swings harder or softer than the next.
   const swing = profile.gain * base;
@@ -295,13 +304,18 @@ export function computeValue(
   const activity = quiet ? base : 0.55 + 0.45 * base;
   const noiseUnit = cfg.noise * profile.noiseScale * activity;
   const noise = noiseUnit * layeredNoise(params.seed, type, at);
-  const events = eventBoost(
-    params.seed,
-    type,
-    at,
-    cfg.noise * activity,
-    params.offsetMinutes,
-  );
+  // Bursts keep a floor of their own: a tap opening on a nearly idle line is a
+  // step, not a louder version of the line's resting jitter. But a sensor
+  // sitting at exactly its floor is off rather than idle — a drained irrigation
+  // main in January gets no draw-offs — so there they stop entirely.
+  // `cfg` is narrowed by `kind`, which drops the optional fields; read them off
+  // the widened entry (see configOf).
+  const burstAmplitude = configOf(type).eventAmplitude ?? cfg.noise;
+  const burstUnit =
+    quiet && base === 0
+      ? 0
+      : burstAmplitude * (EVENT_FLOOR + (1 - EVENT_FLOOR) * activity);
+  const events = eventBoost(params.seed, type, at, burstUnit, params.offsetMinutes);
 
   const normalized = saturate(swing + levelTerm + noise + events, !quiet);
   const value = min + normalized * (max - min);

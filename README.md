@@ -144,11 +144,11 @@ is damped, lagged, held near a setpoint, and driven by the occupancy schedule
 | `light` | Moonlight to ~90,000 lux, dimmed by cloud, with civil twilight at each end | A ~2% daylight factor plus maintained electric lighting when the room is occupied and daylight runs short |
 | `irradiance` | Clear-sky GHI reduced by cloud cover (0 at night) | The same, through glazing onto an interior surface (~16%) |
 | `air_quality` | CO₂ background (~421 ppm) plus a little traffic, trapped by the nocturnal inversion | A crowding signal: climbs as the room fills, clears to near-outdoor overnight |
-| `energy_consumption` | Exterior loads: dusk-to-dawn lighting and freeze protection, so it **peaks at night and in the cold** | Base load + plug load + lighting + HVAC, so it peaks through the occupied day |
+| `energy_consumption` | A site meter: standing load, dusk-to-dawn lighting trimmed through the small hours, plant following site activity, plus heat rejection or freeze protection. **Peaks on a hot afternoon in July and overnight in January** | Base load + plug load + lighting + HVAC, so it peaks through the occupied day |
 | `movement` | Pedestrians and vehicles, peaking at the commute | Occupancy detection, following the working day |
 | `noise_level` | ~36 dB at night to ~60 dB at rush hour | ~31 dB empty to ~55 dB busy, plus transients |
-| `flow` | Irrigation: a pre-dawn burst in the growing season, nothing once the line would freeze | Domestic water: draw-offs through the working day, nothing overnight |
-| `state` | Duty cycle of the lighting circuit and freeze protection | Duty cycle of the HVAC and the people |
+| `flow` | Site water: irrigation cycles before dawn and after dusk in the growing season, evaporative make-up while the plant rejects heat, hose draw through an active day — and a hard zero once the line would freeze | Domestic water: draw-offs through the working day, nothing overnight |
+| `state` | Duty cycle of the lighting circuit and the weather-driven plant | Duty cycle of the HVAC and the people |
 | `atmospheric_pressure` | The air mass: synoptic highs and lows, dropping with cloud | The same, plus a fraction of a hPa of building pressurization |
 
 Every sensor at a given seed and site shares one weather series, so they agree
@@ -299,12 +299,12 @@ carries `defaultTimezone` and the `timezones` abbreviations `?tz=` accepts, plus
 | `temperature`          | °C      | 15 – 30       | 5 min     | Season and site outdoors; the setpoint indoors |
 | `light`                | lux     | 0 – 100000    | 5 min     | Sun and cloud; glazing + electric lighting indoors |
 | `humidity`             | %RH     | 0 – 100       | 5 min     | Dew point vs air temperature (dry indoors in winter) |
-| `energy_consumption`   | W       | 100 – 3000    | 1 min     | Occupancy + HVAC indoors; exterior lighting and freeze protection outdoors |
+| `energy_consumption`   | W       | 0 – 2320      | 1 min     | Occupancy + HVAC indoors; lighting, site activity and the weather outdoors |
 | `movement`             | bool    | 0 / 1         | 1 s       | Occupancy indoors; traffic and pedestrians outdoors |
 | `air_quality`          | ppm     | 400 – 2000    | 1 min     | Crowding indoors; background + traffic outdoors |
 | `atmospheric_pressure` | hPa     | 980 – 1040    | 10 min    | Synoptic highs and lows passing over |
 | `irradiance`           | W/m²    | 0 – 1000      | 5 min     | Clear-sky GHI reduced by cloud |
-| `flow`                 | L/min   | 0 – 12        | 5 s       | Domestic draw-offs indoors; irrigation outdoors |
+| `flow`                 | L/min   | 0 – 12        | 5 s       | Domestic draw-offs indoors; irrigation, make-up and hose draw outdoors |
 | `state`                | enum    | on/off/idle/error | 10 s  | Plant duty cycle; error rare and stress-linked |
 | `noise_level`          | dB      | 30 – 80       | 1 s       | Occupancy indoors; traffic outdoors, plus transients |
 
@@ -437,7 +437,8 @@ different, equally reproducible series.
 /api/sensor/temperature?placement=indoor&window=24h            # held near a setpoint
 /api/sensor/temperature?at=2026-01-15T12:00:00&window=24h      # outdoor January: below freezing
 /api/sensor/air_quality?placement=indoor&window=24h            # CO2 climbs as the room fills
-/api/sensor/energy_consumption?placement=outdoor&window=24h    # exterior load: peaks at night
+/api/sensor/energy_consumption?placement=outdoor&window=24h    # site meter: afternoon peak in July
+/api/sensor/flow?placement=outdoor&window=24h                  # irrigation cycles, make-up, hose draw
 
 # Location (default 45 N, 75 W)
 /api/sensor/irradiance?lat=45&lon=-75&at=2026-07-28T12:00:00   # solar noon ~13:09 EDT
@@ -558,9 +559,9 @@ sunset and clear-sky irradiance come from the NOAA solar equations, so an
 seasonal air temperature — a mid-latitude January reads below freezing rather
 than pretending to be 15–30 °C all year. `?placement=indoor` is damped, lagged
 and held near a setpoint, with the occupancy schedule driving CO₂, lighting,
-water and noise. Some sensors invert entirely: an exterior electricity meter
-peaks at night on dusk-to-dawn lighting and freeze protection, while an indoor
-one peaks through the occupied day.
+water and noise. Some sensors change character entirely: an indoor electricity
+meter follows the occupied day, while an exterior one follows the weather — a hot
+July afternoon rejecting heat, or a January night on lighting and trace heating.
 
 Because the weather is seeded per site rather than per sensor, the sensors now
 agree with each other: one overcast afternoon dims `light`, flattens

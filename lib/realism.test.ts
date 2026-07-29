@@ -4,6 +4,9 @@ import {
   REFERENCE_SITE,
   airTemp,
   electricLighting,
+  exteriorLighting,
+  freezeProtection,
+  heatRejection,
   hvacDemand,
   indoorAirTemp,
   indoorIlluminance,
@@ -212,6 +215,46 @@ describe("schedules", () => {
     for (const d of [winterOccupied, winterEmpty, mildOccupied]) {
       expect(d).toBeGreaterThanOrEqual(0);
       expect(d).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe("exterior plant", () => {
+  it("lights dusk to dawn and trims output through the small hours", () => {
+    expect(exteriorLighting(ctxAt(SUMMER, 12))).toBe(0);
+    const dusk = exteriorLighting(ctxAt(SUMMER, 23));
+    const smallHours = exteriorLighting(ctxAt(SUMMER, 3));
+    expect(dusk).toBeCloseTo(1, 2);
+    expect(smallHours).toBeGreaterThan(0.4);
+    expect(smallHours).toBeLessThan(dusk);
+  });
+
+  it("does not put a spike on the end of the night releasing the trim", () => {
+    // The trim must not come back off while it is still dark, or the last hour
+    // before dawn reads higher than the hour before it.
+    let previous = exteriorLighting(ctxAt(SUMMER, 1.5));
+    for (let hour = 1.75; hour <= 6; hour += 0.25) {
+      const output = exteriorLighting(ctxAt(SUMMER, hour));
+      expect(output).toBeLessThanOrEqual(previous + 1e-9);
+      previous = output;
+    }
+  });
+
+  it("rejects heat on a summer afternoon and none of it on a winter night", () => {
+    expect(heatRejection(ctxAt(SUMMER, 16))).toBeGreaterThan(0.4);
+    expect(heatRejection(ctxAt(WINTER, 2))).toBe(0);
+  });
+
+  it("runs freeze protection in January and never in July", () => {
+    expect(freezeProtection(ctxAt(WINTER, 3))).toBe(1);
+    expect(freezeProtection(ctxAt(SUMMER, 3))).toBe(0);
+  });
+
+  it("never asks for heating and cooling at the same time", () => {
+    for (const iso of [SUMMER, WINTER, "2026-04-12", "2026-10-08"]) {
+      for (const ctx of dayOfContexts(iso)) {
+        expect(Math.min(heatRejection(ctx), freezeProtection(ctx))).toBe(0);
+      }
     }
   });
 });
